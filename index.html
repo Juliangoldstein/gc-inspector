@@ -1414,15 +1414,13 @@ function toast(msg,tipo){
 
 // ── Online/Offline ─────────────────────────────────────────────
 async function actualizarConexion(){
-  // Ping real en lugar de navigator.onLine (más confiable en iOS Safari)
-  let online=false;
-  try{
-    const res=await fetch('https://www.google.com/favicon.ico?_='+Date.now(),{
-      method:'HEAD', mode:'no-cors', cache:'no-store'
-    });
-    online=true;
-  }catch(e){
-    online=navigator.onLine;
+  // Usar navigator.onLine + verificar con el Apps Script propio
+  let online=navigator.onLine;
+  if(online){
+    try{
+      const res=await fetch(CONFIG.APPS_SCRIPT_URL,{method:'GET',cache:'no-store'});
+      online=res.ok;
+    }catch(e){online=false}
   }
   ['home-badge','insp-sync-badge'].forEach(id=>{
     const el=document.getElementById(id);
