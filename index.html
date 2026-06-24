@@ -1,0 +1,1416 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#1a1a1a">
+<title>GC Inspector de Obra</title>
+<link rel="manifest" href="manifest.json">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#111110;--surface:#1c1c1a;--surface2:#242422;
+  --border:rgba(255,255,255,0.09);--border2:rgba(255,255,255,0.16);
+  --text:#e8e6e0;--muted:#888780;--hint:#555450;
+  --accent:#c8a96e;--accent2:#8fb89a;
+  --danger:#d66a5a;--warn:#c4935a;--ok:#6aab7e;
+  --r:10px;--rs:6px;
+  --font:'Helvetica Neue',Arial,sans-serif;
+  --mono:'SF Mono','Fira Code',monospace;
+  --hh:52px;--th:52px;--tabh:40px;
+}
+html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--font);overflow:hidden}
+
+/* ── VISTAS ── */
+.vista{position:fixed;inset:0;display:flex;flex-direction:column;transition:opacity 0.2s}
+.vista.oculta{opacity:0;pointer-events:none}
+
+/* ══ HOME ══════════════════════════════════════════════════════ */
+#home{background:var(--bg);overflow-y:auto}
+.home-header{padding:24px 20px 0;display:flex;align-items:center;gap:10px}
+.home-logo{font-size:11px;font-weight:700;letter-spacing:0.14em;color:var(--accent);text-transform:uppercase}
+.home-sync-badge{margin-left:auto;font-size:11px;padding:3px 10px;border-radius:20px;border:0.5px solid;display:flex;align-items:center;gap:5px}
+.home-sync-badge.online{background:rgba(106,171,126,0.12);color:var(--ok);border-color:rgba(106,171,126,0.3)}
+.home-sync-badge.offline{background:rgba(200,169,110,0.1);color:var(--warn);border-color:rgba(200,169,110,0.25)}
+.dot{width:6px;height:6px;border-radius:50%;background:currentColor}
+
+.home-hero{padding:32px 20px 20px;text-align:center}
+.home-hero h1{font-size:22px;font-weight:500;color:var(--text);margin-bottom:6px}
+.home-hero p{font-size:13px;color:var(--muted);line-height:1.6}
+
+.home-actions{display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:0 20px}
+.home-btn{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;
+  padding:20px 12px;border-radius:var(--r);border:0.5px solid var(--border2);
+  background:var(--surface);color:var(--text);cursor:pointer;transition:all 0.15s;text-align:center}
+.home-btn:hover{background:var(--surface2);border-color:var(--accent)}
+.home-btn svg{opacity:0.6}
+.home-btn span{font-size:13px;font-weight:500}
+.home-btn small{font-size:11px;color:var(--muted)}
+
+.home-section{padding:24px 20px 8px}
+.home-section h2{font-size:11px;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;color:var(--muted);margin-bottom:12px}
+
+.plano-card{display:flex;align-items:center;gap:12px;padding:12px 14px;
+  background:var(--surface);border:0.5px solid var(--border);border-radius:var(--r);
+  margin-bottom:8px;cursor:pointer;transition:all 0.12s}
+.plano-card:hover{border-color:var(--accent);background:var(--surface2)}
+.plano-icon{width:38px;height:38px;border-radius:8px;background:rgba(200,169,110,0.1);
+  display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.plano-info{flex:1;min-width:0}
+.plano-info strong{font-size:13px;font-weight:500;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.plano-info span{font-size:11px;color:var(--muted);margin-top:2px;display:block}
+.plano-badge{font-size:10px;padding:2px 7px;border-radius:10px;font-weight:600;white-space:nowrap}
+.plano-badge.alta{background:rgba(214,106,90,0.15);color:var(--danger)}
+.plano-badge.ok{background:rgba(106,171,126,0.12);color:var(--ok)}
+.plano-card-actions{display:flex;gap:6px;flex-shrink:0}
+.btn-icon{background:none;border:none;color:var(--muted);cursor:pointer;padding:4px;border-radius:4px;font-size:14px}
+.btn-icon:hover{color:var(--danger)}
+
+.home-empty{text-align:center;padding:2rem 1rem;font-size:13px;color:var(--hint);line-height:1.8}
+
+.btn-sync-all{display:flex;align-items:center;justify-content:center;gap:6px;
+  width:calc(100% - 40px);margin:16px 20px;padding:11px;
+  background:rgba(143,184,154,0.1);border:0.5px solid rgba(143,184,154,0.3);
+  color:var(--accent2);border-radius:var(--r);cursor:pointer;font-size:13px;font-family:var(--font);
+  transition:all 0.12s}
+.btn-sync-all:hover{background:rgba(143,184,154,0.18)}
+.btn-sync-all:disabled{opacity:0.4;cursor:not-allowed}
+
+/* ══ INSPECTOR ═════════════════════════════════════════════════ */
+#inspector{background:var(--bg)}
+
+/* Tabs de planos */
+#plano-tabs{
+  height:var(--tabh);display:flex;align-items:stretch;
+  background:var(--surface);border-bottom:0.5px solid var(--border);
+  overflow-x:auto;flex-shrink:0;
+}
+#plano-tabs::-webkit-scrollbar{height:0}
+.ptab{
+  display:flex;align-items:center;gap:6px;padding:0 12px;
+  border-right:0.5px solid var(--border);white-space:nowrap;cursor:pointer;
+  font-size:12px;color:var(--muted);min-width:0;max-width:180px;
+  border-bottom:2px solid transparent;transition:all 0.12s;flex-shrink:0;
+}
+.ptab:hover{color:var(--text);background:var(--surface2)}
+.ptab.active{color:var(--accent);border-bottom-color:var(--accent);background:var(--bg)}
+.ptab-name{overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0}
+.ptab-close{width:16px;height:16px;border-radius:50%;background:none;border:none;
+  color:var(--muted);cursor:pointer;font-size:12px;line-height:1;flex-shrink:0;
+  display:flex;align-items:center;justify-content:center;transition:all 0.1s}
+.ptab-close:hover{background:rgba(214,106,90,0.2);color:var(--danger)}
+.ptab-add{padding:0 14px;color:var(--muted);cursor:pointer;font-size:18px;
+  display:flex;align-items:center;border-right:0.5px solid var(--border);flex-shrink:0}
+.ptab-add:hover{color:var(--accent);background:var(--surface2)}
+
+/* Área principal inspector */
+#insp-body{flex:1;display:grid;grid-template-rows:var(--hh) 1fr var(--th);grid-template-columns:1fr 320px;overflow:hidden}
+
+/* Header inspector */
+#insp-header{
+  grid-column:1/-1;display:flex;align-items:center;gap:10px;
+  padding:0 14px;border-bottom:0.5px solid var(--border);background:var(--surface);
+}
+.btn-home{background:none;border:none;color:var(--muted);cursor:pointer;
+  padding:6px;border-radius:var(--rs);font-size:13px;display:flex;align-items:center;gap:4px}
+.btn-home:hover{color:var(--accent);background:var(--surface2)}
+#insp-plano-nombre{font-size:12px;color:var(--text);flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#insp-sync-badge{font-size:11px;padding:3px 8px;border-radius:20px;border:0.5px solid;display:flex;align-items:center;gap:4px}
+#insp-sync-badge.online{background:rgba(106,171,126,0.12);color:var(--ok);border-color:rgba(106,171,126,0.3)}
+#insp-sync-badge.offline{background:rgba(200,169,110,0.1);color:var(--warn);border-color:rgba(200,169,110,0.25)}
+
+/* Canvas */
+#canvas-area{
+  grid-column:1;grid-row:2;position:relative;overflow:hidden;
+  background:#0d0d0c;cursor:grab;
+}
+#canvas-area.modo-marcar{cursor:crosshair}
+#canvas-area:active{cursor:grabbing}
+#canvas-area.modo-marcar:active{cursor:crosshair}
+#pdf-canvas{position:absolute;top:0;left:0;transform-origin:0 0}
+
+#drop-zone{position:absolute;inset:0;display:flex;flex-direction:column;
+  align-items:center;justify-content:center;gap:10px;pointer-events:none}
+#drop-zone.hidden{display:none}
+#drop-zone p{font-size:13px;color:var(--hint);text-align:center;line-height:1.7}
+#drop-zone strong{color:var(--muted)}
+
+/* Botones modo sobre el canvas */
+#modo-ctrl{
+  position:absolute;top:10px;left:50%;transform:translateX(-50%);
+  display:flex;gap:6px;z-index:10;
+}
+#modo-ctrl button{
+  display:flex;align-items:center;gap:5px;padding:7px 14px;
+  border-radius:20px;border:0.5px solid var(--border2);
+  background:rgba(28,28,26,0.92);backdrop-filter:blur(8px);
+  color:var(--muted);font-size:12px;font-family:var(--font);
+  cursor:pointer;transition:all 0.12s;white-space:nowrap;
+  box-shadow:0 2px 8px rgba(0,0,0,0.3);
+}
+#modo-ctrl button:hover{color:var(--text);border-color:var(--border2)}
+#modo-ctrl button.active{
+  background:rgba(200,169,110,0.15);
+  border-color:rgba(200,169,110,0.5);
+  color:var(--accent);
+}
+#zoom-ctrl{position:absolute;bottom:12px;left:12px;display:flex;flex-direction:column;gap:2px}
+.zoom-btn{width:32px;height:32px;background:var(--surface);border:0.5px solid var(--border2);
+  color:var(--text);border-radius:6px;font-size:16px;cursor:pointer;
+  display:flex;align-items:center;justify-content:center;transition:background 0.1s}
+.zoom-btn:hover{background:var(--surface2)}
+#zoom-label{font-size:10px;color:var(--muted);text-align:center;font-family:var(--mono);padding:2px 0}
+
+#page-ctrl{position:absolute;bottom:12px;left:50%;transform:translateX(-50%);
+  display:flex;align-items:center;gap:8px;background:var(--surface);
+  border:0.5px solid var(--border2);border-radius:8px;padding:4px 10px}
+#page-ctrl button{background:none;border:none;color:var(--muted);cursor:pointer;font-size:14px;padding:2px 4px}
+#page-ctrl button:hover{color:var(--text)}
+#page-info{font-size:12px;color:var(--text);font-family:var(--mono);min-width:60px;text-align:center}
+
+/* Marcadores */
+.marker{position:absolute;width:28px;height:28px;border-radius:50% 50% 50% 0;
+  transform:translate(-50%,-100%) rotate(-45deg);display:flex;align-items:center;
+  justify-content:center;cursor:pointer;transition:transform 0.15s,box-shadow 0.15s;
+  box-shadow:0 2px 8px rgba(0,0,0,0.5);border:1.5px solid rgba(255,255,255,0.2)}
+.marker-inner{transform:rotate(45deg);font-size:10px;font-weight:600;color:#fff;font-family:var(--mono);line-height:1}
+.marker:hover{transform:translate(-50%,-100%) rotate(-45deg) scale(1.2)}
+.marker.activo{transform:translate(-50%,-100%) rotate(-45deg) scale(1.25);box-shadow:0 0 0 3px rgba(200,169,110,0.4)}
+.marker.alta{background:var(--danger)}
+.marker.media{background:var(--warn)}
+.marker.baja{background:var(--ok)}
+
+/* Toolbar */
+#toolbar{grid-column:1;grid-row:3;display:flex;align-items:center;gap:6px;
+  padding:0 12px;border-top:0.5px solid var(--border);background:var(--surface)}
+.tool-btn{display:flex;align-items:center;gap:5px;padding:7px 11px;border-radius:var(--rs);
+  border:0.5px solid var(--border2);background:transparent;color:var(--muted);
+  font-size:12px;font-family:var(--font);cursor:pointer;transition:all 0.12s;white-space:nowrap}
+.tool-btn:hover{background:var(--surface2);color:var(--text)}
+.tool-btn.active{background:rgba(200,169,110,0.12);border-color:rgba(200,169,110,0.4);color:var(--accent)}
+.sep-v{width:1px;height:22px;background:var(--border);margin:0 2px}
+
+/* Panel lateral */
+#panel{grid-column:2;grid-row:2/4;display:flex;flex-direction:column;
+  border-left:0.5px solid var(--border);background:var(--surface);overflow:hidden}
+#tabs{display:flex;border-bottom:0.5px solid var(--border);flex-shrink:0}
+.tab{flex:1;padding:11px 8px;font-size:12px;text-align:center;color:var(--muted);
+  cursor:pointer;border-bottom:2px solid transparent;transition:all 0.12s}
+.tab.active{color:var(--accent);border-bottom-color:var(--accent)}
+#tab-form{flex:1;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:11px}
+#tab-form.hidden,#tab-lista.hidden{display:none}
+
+.field-group label{font-size:11px;color:var(--muted);display:block;margin-bottom:5px;
+  letter-spacing:0.04em;text-transform:uppercase}
+.field-group input,.field-group select,.field-group textarea{
+  width:100%;padding:8px 10px;background:var(--surface2);border:0.5px solid var(--border2);
+  border-radius:var(--rs);color:var(--text);font-size:13px;font-family:var(--font);transition:border-color 0.12s}
+.field-group input:focus,.field-group select:focus,.field-group textarea:focus{outline:none;border-color:var(--accent)}
+.field-group textarea{resize:none;height:76px;line-height:1.5}
+.field-group select option{background:var(--surface2)}
+
+.id-badge{display:inline-flex;align-items:center;gap:6px;font-size:17px;font-weight:600;
+  font-family:var(--mono);color:var(--accent);letter-spacing:0.02em}
+.id-badge small{font-size:11px;color:var(--muted);font-weight:400;font-family:var(--font)}
+
+.sev-row{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px}
+.sev-btn{padding:7px 4px;border-radius:var(--rs);border:0.5px solid var(--border2);
+  background:transparent;color:var(--muted);font-size:12px;font-weight:500;
+  cursor:pointer;text-align:center;transition:all 0.12s;font-family:var(--font)}
+.sev-btn:hover{color:var(--text);background:var(--surface2)}
+.sev-btn.alta.sel{background:rgba(214,106,90,0.15);border-color:var(--danger);color:var(--danger)}
+.sev-btn.media.sel{background:rgba(196,147,90,0.15);border-color:var(--warn);color:var(--warn)}
+.sev-btn.baja.sel{background:rgba(106,171,126,0.15);border-color:var(--ok);color:var(--ok)}
+#btn-pendiente.sel{background:rgba(214,106,90,0.15);border-color:var(--danger);color:var(--danger)}
+#btn-resuelta.sel{background:rgba(106,171,126,0.15);border-color:var(--ok);color:var(--ok)}
+.marker.resuelta{opacity:0.5;border:2px dashed rgba(255,255,255,0.4)}
+
+.foto-area{border:1px dashed var(--border2);border-radius:var(--rs);padding:10px;
+  text-align:center;cursor:pointer;transition:border-color 0.12s}
+.foto-area:hover{border-color:var(--accent)}
+.foto-area p{font-size:12px;color:var(--muted);margin-top:5px}
+.foto-preview{width:100%;border-radius:var(--rs);margin-top:6px;display:none}
+
+.btn-guardar{width:100%;padding:10px;background:var(--accent);border:none;
+  border-radius:var(--rs);color:#1a1509;font-size:13px;font-weight:600;
+  cursor:pointer;transition:opacity 0.12s;font-family:var(--font)}
+.btn-guardar:hover{opacity:0.88}
+.btn-eliminar{width:100%;padding:8px;background:none;border:0.5px solid var(--border2);
+  border-radius:var(--rs);color:var(--muted);font-size:12px;cursor:pointer;
+  font-family:var(--font);transition:all 0.12s}
+.btn-eliminar:hover{color:var(--danger);border-color:rgba(214,106,90,0.4)}
+
+.hint-marcar{text-align:center;padding:2rem 1rem;font-size:13px;color:var(--hint);line-height:1.7}
+
+#tab-lista{flex:1;overflow-y:auto;display:flex;flex-direction:column}
+.lista-toolbar{padding:10px 14px;display:flex;align-items:center;justify-content:space-between;
+  border-bottom:0.5px solid var(--border);flex-shrink:0}
+.lista-toolbar span{font-size:12px;color:var(--muted)}
+.btn-sync{font-size:11px;padding:4px 10px;border-radius:20px;
+  background:rgba(143,184,154,0.12);border:0.5px solid rgba(143,184,154,0.3);
+  color:var(--accent2);cursor:pointer;font-family:var(--font);transition:all 0.12s}
+.btn-sync:hover{background:rgba(143,184,154,0.2)}
+.btn-sync:disabled{opacity:0.4;cursor:not-allowed}
+
+.obs-item{padding:11px 14px;border-bottom:0.5px solid var(--border);
+  display:flex;gap:10px;align-items:flex-start;cursor:pointer;transition:background 0.1s}
+.obs-item:hover{background:var(--surface2)}
+.obs-item.activo{background:rgba(200,169,110,0.07);border-left:2px solid var(--accent)}
+.obs-pin{width:24px;height:24px;border-radius:50% 50% 50% 0;flex-shrink:0;margin-top:2px;
+  display:flex;align-items:center;justify-content:center;transform:rotate(-45deg)}
+.obs-pin span{transform:rotate(45deg);font-size:9px;font-weight:700;color:#fff;font-family:var(--mono)}
+.obs-pin.alta{background:var(--danger)}.obs-pin.media{background:var(--warn)}.obs-pin.baja{background:var(--ok)}
+.obs-info{flex:1;min-width:0}
+.obs-info strong{font-size:12px;font-weight:600;font-family:var(--mono);color:var(--accent)}
+.obs-desc{font-size:12px;color:var(--text);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.obs-meta{font-size:11px;color:var(--muted);margin-top:3px}
+.lista-empty{padding:3rem 1rem;text-align:center;font-size:13px;color:var(--hint);line-height:1.7}
+
+/* Toast */
+#toast{position:fixed;bottom:80px;left:50%;transform:translateX(-50%) translateY(20px);
+  background:var(--surface2);border:0.5px solid var(--border2);color:var(--text);
+  font-size:13px;padding:10px 18px;border-radius:8px;box-shadow:0 4px 20px rgba(0,0,0,0.5);
+  opacity:0;transition:all 0.25s;pointer-events:none;white-space:nowrap;z-index:200}
+#toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+#toast.ok{border-color:rgba(106,171,126,0.4);color:var(--ok)}
+#toast.err{border-color:rgba(214,106,90,0.4);color:var(--danger)}
+
+::-webkit-scrollbar{width:4px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--border2);border-radius:4px}
+
+/* ── MOBILE ── */
+@media(max-width:640px){
+  :root{--hh:48px;--th:52px;--tabh:38px}
+  #insp-body{grid-template-columns:1fr;grid-template-rows:var(--hh) 1fr var(--th)}
+  #canvas-area{grid-column:1;grid-row:2}
+  #toolbar{grid-column:1;grid-row:3;overflow-x:auto;justify-content:space-around;padding:0 8px}
+  .tool-btn span{display:none}
+  .tool-btn{padding:6px 10px}
+  #panel{
+    position:fixed;bottom:var(--th);left:0;right:0;height:52dvh;
+    border-left:none;border-top:0.5px solid var(--border2);
+    border-radius:14px 14px 0 0;
+    transform:translateY(100%);transition:transform 0.3s cubic-bezier(0.32,0.72,0,1);
+    z-index:50;box-shadow:0 -8px 30px rgba(0,0,0,0.5)
+  }
+  #panel.abierto{transform:translateY(0)}
+  #panel-handle{display:flex!important}
+  #btn-panel-toggle{display:flex!important}
+  .home-actions{grid-template-columns:1fr 1fr}
+}
+@media(min-width:641px){
+  #panel-handle,#btn-panel-toggle{display:none!important}
+}
+#panel-handle{display:none;justify-content:center;padding:8px 0 4px;flex-shrink:0;cursor:pointer}
+#panel-handle-bar{width:36px;height:4px;background:var(--border2);border-radius:2px}
+
+#btn-panel-toggle{
+  display:none;position:fixed;bottom:calc(var(--th) + 12px);right:12px;
+  width:44px;height:44px;border-radius:50%;background:var(--accent);
+  border:none;color:#1a1509;font-size:20px;cursor:pointer;z-index:60;
+  align-items:center;justify-content:center;
+  box-shadow:0 4px 16px rgba(0,0,0,0.4);transition:transform 0.2s
+}
+#btn-panel-toggle.abierto{transform:rotate(45deg)}
+</style>
+</head>
+<body>
+
+<!-- ══ HOME ══════════════════════════════════════════════════════ -->
+<div class="vista" id="home">
+  <div class="home-header">
+    <span class="home-logo">GC Inspector</span>
+    <span class="home-sync-badge offline" id="home-badge">
+      <span class="dot"></span><span id="home-badge-txt">Sin conexión</span>
+    </span>
+  </div>
+
+  <div class="home-hero">
+    <h1>Inspector de obra</h1>
+    <p>Cargá un plano y marcá observaciones<br>directamente sobre el PDF</p>
+  </div>
+
+  <div class="home-actions">
+    <div class="home-btn" onclick="document.getElementById('file-home').click()">
+      <svg width="28" height="28" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+      <span>PDF desde dispositivo</span>
+      <small>Elegir archivo</small>
+    </div>
+    <div class="home-btn" onclick="abrirDropbox()">
+      <svg width="28" height="28" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+      <span>Desde Dropbox</span>
+      <small>Conectar carpeta</small>
+    </div>
+  </div>
+  <input type="file" id="file-home" accept=".pdf" style="display:none" onchange="cargarPdfLocal(event)">
+
+  <div class="home-section">
+    <h2>Planos abiertos</h2>
+    <div id="planos-abiertos-lista"></div>
+  </div>
+
+  <div class="home-section">
+    <h2>Historial</h2>
+    <div id="historial-lista"></div>
+  </div>
+
+
+</div>
+
+<!-- ══ INSPECTOR ══════════════════════════════════════════════════ -->
+<div class="vista oculta" id="inspector">
+
+  <!-- Tabs de planos -->
+  <div id="plano-tabs">
+    <div class="ptab-add" onclick="irHome()" title="Volver al inicio">⌂</div>
+    <div id="tabs-container"></div>
+    <div class="ptab-add" onclick="document.getElementById('file-insp').click()" title="Abrir otro plano">＋</div>
+    <input type="file" id="file-insp" accept=".pdf" style="display:none" onchange="cargarPdfLocal(event)">
+  </div>
+
+  <!-- Body inspector -->
+  <div id="insp-body">
+
+    <!-- Header -->
+    <header id="insp-header">
+      <span id="insp-plano-nombre">—</span>
+      <div style="margin-left:auto;display:flex;align-items:center;gap:8px">
+        <span id="insp-sync-badge" class="offline">
+          <span class="dot"></span><span id="insp-badge-txt">Sin conexión</span>
+        </span>
+      </div>
+    </header>
+
+    <!-- Canvas -->
+    <div id="canvas-area">
+      <canvas id="pdf-canvas"></canvas>
+      <div id="drop-zone">
+        <svg width="40" height="40" fill="none" viewBox="0 0 24 24" stroke="#555" stroke-width="1"><path d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+        <p><strong>Cargando plano…</strong></p>
+      </div>
+      <!-- Botones modo: siempre visibles sobre el canvas -->
+      <div id="modo-ctrl">
+        <button id="btn-nav" onclick="setModo('nav')" title="Navegar">
+          <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M15 15l-2 5L9 9l11 4-5 2zm0 0l5 5"/></svg>
+          Navegar
+        </button>
+        <button id="btn-marcar" onclick="setModo('marcar')" title="Marcar observación">
+          <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7z"/><circle cx="12" cy="9" r="2.5"/></svg>
+          Marcar
+        </button>
+      </div>
+      <div id="zoom-ctrl">
+        <button class="zoom-btn" onmousedown="e=>{e.stopPropagation()}" ontouchstart="event.stopPropagation()" onclick="zoom(1.25);event.stopPropagation()">+</button>
+        <span id="zoom-label">100%</span>
+        <button class="zoom-btn" ontouchstart="event.stopPropagation()" onclick="zoom(0.8);event.stopPropagation()">−</button>
+      </div>
+      <div id="page-ctrl" style="display:none">
+        <button onclick="cambiarPag(-1)">‹</button>
+        <span id="page-info">Pág 1 / 1</span>
+        <button onclick="cambiarPag(1)">›</button>
+      </div>
+    </div>
+
+    <!-- Toolbar -->
+    <div id="toolbar">
+      <button class="tool-btn" onclick="abrirDropbox()" title="Dropbox">
+        <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        <span>Dropbox</span>
+      </button>
+      <div class="sep-v" style="margin-left:auto"></div>
+      <button class="tool-btn" onclick="exportarCSV()" title="Exportar">
+        <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        <span>Exportar</span>
+      </button>
+    </div>
+
+    <!-- Panel -->
+    <aside id="panel">
+      <div id="panel-handle" onclick="togglePanel()"><div id="panel-handle-bar"></div></div>
+      <div id="tabs">
+        <div class="tab active" id="tab-btn-form" onclick="switchTab('form')">Observación</div>
+        <div class="tab" id="tab-btn-lista" onclick="switchTab('lista')">
+          Lista <span id="lista-count" style="font-size:10px;margin-left:3px;background:rgba(200,169,110,0.2);color:var(--accent);padding:1px 5px;border-radius:10px">0</span>
+        </div>
+      </div>
+      <div id="tab-form">
+        <div id="form-hint" class="hint-marcar">
+          <svg width="22" height="22" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" style="opacity:0.3;margin-bottom:8px"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7z"/></svg>
+          <p>Activá el modo <strong style="color:var(--accent)">Marcar</strong> y tocá sobre el plano.</p>
+        </div>
+        <div id="form-fields" style="display:none;flex-direction:column;gap:11px">
+          <div class="id-badge" id="obs-id-badge">—<small>Sin selección</small></div>
+          <div class="field-group">
+            <label>Rubro</label>
+            <select id="inp-rubro" onchange="actualizarResponsables()">
+              <option>Agua</option>
+              <option>Aire Acondicionado</option>
+              <option>Carpintería aluminio</option>
+              <option>Cerámico</option>
+              <option>Cloaca y pluvial</option>
+              <option>Durlock</option>
+              <option>Electricidad</option>
+              <option>Estructura</option>
+              <option>Gas</option>
+              <option>Incendio</option>
+              <option>Mampostería</option>
+              <option>Marcos y premarcos</option>
+              <option>Marmoles</option>
+              <option>Metalúrgica</option>
+              <option>Muebles</option>
+              <option>Pintura</option>
+              <option>Replanteo</option>
+              <option>Revoque y Contrapiso</option>
+              <option>Terminaciones</option>
+              <option>Yeso</option>
+              <option>Zócalos</option>
+            </select>
+          </div>
+          <div class="field-group">
+            <label>Descripción</label>
+            <textarea id="inp-desc" placeholder="¿Qué está mal y dónde exactamente?"></textarea>
+          </div>
+          <div class="field-group">
+            <label>Severidad</label>
+            <div class="sev-row">
+              <button class="sev-btn alta" onclick="setSev(this,'alta')">Alta</button>
+              <button class="sev-btn media sel" onclick="setSev(this,'media')">Media</button>
+              <button class="sev-btn baja" onclick="setSev(this,'baja')">Baja</button>
+            </div>
+          </div>
+          <div class="field-group">
+            <label>Foto (opcional)</label>
+            <div class="foto-area" onclick="document.getElementById('foto-input').click()">
+              <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" style="opacity:0.4"><path d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z"/><circle cx="12" cy="13" r="4"/></svg>
+              <p>Tocar para tomar foto o galería</p>
+              <img id="foto-preview" class="foto-preview" alt="">
+            </div>
+            <input type="file" id="foto-input" accept="image/*" capture="environment" onchange="previewFoto(event)" style="display:none">
+          </div>
+          <div class="field-group">
+            <label>Responsable</label>
+            <select id="inp-responsable" onchange="toggleOtroResponsable()">
+              <option value="">— Sin asignar —</option>
+            </select>
+          </div>
+          <div class="field-group" id="otro-resp-field" style="display:none">
+            <label>¿Quién?</label>
+            <input type="text" id="inp-otro-resp" placeholder="Nombre del responsable…">
+          </div>
+          <!-- Estado -->
+          <div class="field-group" id="estado-field" style="display:none">
+            <label>Estado</label>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">
+              <button class="sev-btn" id="btn-pendiente" onclick="setEstado('pendiente')">🔴 Pendiente</button>
+              <button class="sev-btn" id="btn-resuelta" onclick="setEstado('resuelta')">🟢 Resuelta</button>
+            </div>
+          </div>
+          <!-- Nota resolución -->
+          <div class="field-group" id="nota-resolucion-field" style="display:none">
+            <label>Nota de resolución</label>
+            <textarea id="inp-nota-resolucion" placeholder="¿Cómo se resolvió?"></textarea>
+          </div>
+          <button class="btn-guardar" onclick="guardarObservacion()">Guardar observación</button>
+          <button class="btn-eliminar" id="btn-eliminar" onclick="eliminarActual()">Eliminar esta observación</button>
+        </div>
+      </div>
+      <div id="tab-lista" class="hidden">
+        <div class="lista-toolbar">
+          <span id="lista-resumen">0 observaciones</span>
+          <button class="btn-sync" id="btn-sync" onclick="certificarPlano()">✓ Certificar</button>
+        </div>
+        <div id="obs-lista" style="flex:1;overflow-y:auto"></div>
+      </div>
+    </aside>
+  </div>
+</div>
+
+<button id="btn-panel-toggle" onclick="togglePanel()">✎</button>
+<div id="toast"></div>
+
+<script>
+pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+const CONFIG={
+  APPS_SCRIPT_URL:'https://script.google.com/macros/s/AKfycbxBMLwyI4TL8pERW9KyWaVca5lz5EK0fBDGscGyefxUPhZA_4H_tGaQ7lGTShLILnGYIg/exec',
+  DROPBOX_APP_KEY:'qw79ab7qqu953as',
+  DROPBOX_APP_SECRET:'4iz9dk1tff48jxq',
+  DROPBOX_REFRESH_TOKEN:'h9uoKnqZO-UAAAAAAAAAATVIwKRENA91kwiaZ7bkejgAvIfWUATIMYPVZLVmckgX',
+  DROPBOX_FOLDER:'/Espacio familiar/COMPLEJO CATAMARAN/Catamaran 12/m_Obra',
+  EMAIL_ENCARGADO:'david@goldsteinconstrucciones.com,julian@goldsteinconstrucciones.com',
+  OBRA:'Catamarán 12',
+};
+
+// ── Estado global ──────────────────────────────────────────────
+let planosAbiertos=[];   // [{id, nombre, pdfDoc, pagActual, escala, offsetX, offsetY, obs:[]}]
+let planoActualId=null;
+let pendingObs={};  // {nombreArchivo: {obs:[], idCounter:N}} — observaciones previas esperando PDF
+let db;
+let modo='nav';
+let sevActual='media';
+let obsActiva=null;
+let fotoDataUrl=null;
+let pdfDocActual=null;
+let renderizando=false;
+let estadoActual='pendiente';
+
+// ── IndexedDB ──────────────────────────────────────────────────
+async function initDB(){
+  return new Promise((res,rej)=>{
+    const req=indexedDB.open('gc-inspector-v2',1);
+    req.onupgradeneeded=e=>{
+      const d=e.target.result;
+      if(!d.objectStoreNames.contains('planos')) d.createObjectStore('planos',{keyPath:'id'});
+      if(!d.objectStoreNames.contains('obs')) d.createObjectStore('obs',{keyPath:'id'});
+    };
+    req.onsuccess=e=>{db=e.target.result;res()};
+    req.onerror=()=>rej('Error DB');
+  });
+}
+
+async function dbGet(store,key){
+  return new Promise(res=>{
+    const tx=db.transaction(store,'readonly');
+    const req=tx.objectStore(store).get(key);
+    req.onsuccess=()=>res(req.result);
+    req.onerror=()=>res(null);
+  });
+}
+async function dbPut(store,val){
+  return new Promise(res=>{
+    const tx=db.transaction(store,'readwrite');
+    tx.objectStore(store).put(val);
+    tx.oncomplete=()=>res();
+  });
+}
+async function dbDel(store,key){
+  return new Promise(res=>{
+    const tx=db.transaction(store,'readwrite');
+    tx.objectStore(store).delete(key);
+    tx.oncomplete=()=>res();
+  });
+}
+async function dbGetAll(store){
+  return new Promise(res=>{
+    const tx=db.transaction(store,'readonly');
+    const req=tx.objectStore(store).getAll();
+    req.onsuccess=()=>res(req.result||[]);
+    req.onerror=()=>res([]);
+  });
+}
+
+// ── Plano actual helper ────────────────────────────────────────
+function planoActual(){return planosAbiertos.find(p=>p.id===planoActualId)||null}
+
+// ── Vistas ────────────────────────────────────────────────────
+function mostrarVista(id){
+  document.querySelectorAll('.vista').forEach(v=>v.classList.toggle('oculta',v.id!==id));
+}
+function irHome(){mostrarVista('home');renderHomeUI()}
+function irInspector(){mostrarVista('inspector')}
+
+// ── Home UI ───────────────────────────────────────────────────
+function renderHomeUI(){
+  // Planos abiertos
+  const cont=document.getElementById('planos-abiertos-lista');
+  if(!planosAbiertos.length){
+    cont.innerHTML='<div class="home-empty">No hay planos abiertos.<br>Cargá un PDF para empezar.</div>';
+  } else {
+    cont.innerHTML=planosAbiertos.map(p=>{
+      const altas=p.obs.filter(o=>o.sev==='alta').length;
+      const total=p.obs.length;
+      return `<div class="plano-card" onclick="activarPlano('${p.id}')">
+        <div class="plano-icon"><svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" style="color:var(--accent)"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg></div>
+        <div class="plano-info">
+          <strong>${p.nombre}</strong>
+          <span>${total} observación${total!==1?'es':''}</span>
+        </div>
+        ${altas?`<span class="plano-badge alta">${altas} alta${altas!==1?'s':''}</span>`:'<span class="plano-badge ok">Sin alertas</span>'}
+        <div class="plano-card-actions">
+          <button class="btn-icon" onclick="event.stopPropagation();cerrarPlano('${p.id}')" title="Cerrar plano">✕</button>
+        </div>
+      </div>`;
+    }).join('');
+  }
+
+  // Historial (planos cerrados guardados en DB)
+  renderHistorial();
+}
+
+async function renderHistorial(){
+  const todos=await dbGetAll('planos');
+  const cerrados=todos.filter(p=>!planosAbiertos.find(a=>a.id===p.id));
+  const cont=document.getElementById('historial-lista');
+  if(!cerrados.length){
+    cont.innerHTML='<div class="home-empty" style="padding:1rem">Sin historial previo.</div>';
+    return;
+  }
+  cont.innerHTML=cerrados.map(p=>{
+    const total=(p.obs||[]).length;
+    return `<div class="plano-card" onclick="reabrirPlano('${p.id}')">
+      <div class="plano-icon" style="background:var(--surface2)"><svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" style="color:var(--muted)"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg></div>
+      <div class="plano-info">
+        <strong>${p.nombre}</strong>
+        <span style="color:var(--hint)">${total} obs · cerrado</span>
+      </div>
+      <div class="plano-card-actions">
+        <button class="btn-icon" onclick="event.stopPropagation();eliminarHistorial('${p.id}')" title="Eliminar del historial">✕</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+// ── Cargar PDF ─────────────────────────────────────────────────
+async function cargarPdfLocal(event){
+  const file=event.target.files[0];
+  if(!file)return;
+  event.target.value='';
+  toast('Cargando '+file.name+'…','');
+  const reader=new FileReader();
+  reader.onload=async e=>{
+    try{
+      await abrirNuevoPlano(e.target.result, file.name);
+    }catch(err){
+      toast('Error al cargar el PDF','err');
+      console.error(err);
+    }
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+async function abrirNuevoPlano(arrayBuffer,nombre,dropboxPath){
+  // Si ya está abierto en una pestaña, activarlo
+  const existente=planosAbiertos.find(p=>p.nombre===nombre);
+  if(existente){activarPlano(existente.id);return}
+
+  const pdfDoc=await pdfjsLib.getDocument({data:arrayBuffer}).promise;
+
+  // Buscar registro previo en DB por nombre — reutilizar el mismo ID
+  let obsIniciales=[];
+  let idCounterInicial=1;
+  let idPlano='plano-'+Date.now();
+  let dropboxPathGuardado=dropboxPath||null;
+
+  // Primero buscar en pendingObs (viene de reabrirPlano)
+  if(pendingObs[nombre]){
+    const pending=pendingObs[nombre];
+    obsIniciales=pending.obs||[];
+    idCounterInicial=pending.idCounter||1;
+    idPlano=pending.id||idPlano;
+    dropboxPathGuardado=pending.dropboxPath||dropboxPath||null;
+    delete pendingObs[nombre];
+  } else {
+    // Buscar en DB por nombre
+    const todos=await dbGetAll('planos');
+    const prev=todos.find(p=>p.nombre===nombre);
+    if(prev){
+      obsIniciales=prev.obs||[];
+      idCounterInicial=prev.idCounter||1;
+      idPlano=prev.id; // reutilizar el mismo ID de DB
+      dropboxPathGuardado=dropboxPath||prev.dropboxPath||null;
+    }
+  }
+
+  const plano={
+    id:idPlano, nombre,
+    pdfDoc,
+    dropboxPath:dropboxPathGuardado,
+    totalPags:pdfDoc.numPages,
+    pagActual:1, escala:1.5, offsetX:0, offsetY:0,
+    obs:obsIniciales, idCounter:idCounterInicial
+  };
+
+  planosAbiertos.push(plano);
+  // Guardar/actualizar en DB con el mismo ID
+  await dbPut('planos',{id:idPlano,nombre,obs:obsIniciales,idCounter:idCounterInicial,
+    totalPags:pdfDoc.numPages,dropboxPath:dropboxPathGuardado});
+  await activarPlano(idPlano,pdfDoc);
+  if(obsIniciales.length) toast(`${obsIniciales.length} obs. previas cargadas`,'ok');
+}
+
+async function activarPlano(id,pdfDocArg){
+  planoActualId=id;
+  const p=planoActual();
+  if(!p)return;
+
+  irInspector();
+  renderTabs();
+  document.getElementById('insp-plano-nombre').textContent=p.nombre;
+  document.getElementById('drop-zone').classList.add('hidden');
+
+  obsActiva=null;
+  sevActual='media';
+  fotoDataUrl=null;
+  document.getElementById('form-hint').style.display='';
+  document.getElementById('form-fields').style.display='none';
+  document.getElementById('inp-desc').value='';
+  document.getElementById('foto-preview').style.display='none';
+  document.querySelectorAll('.sev-btn').forEach(b=>{b.classList.remove('sel');if(b.classList.contains('media'))b.classList.add('sel')});
+
+  // Cargar PDF — usar el que viene como argumento, o el guardado en el plano
+  if(pdfDocArg){
+    pdfDocActual=pdfDocArg;
+    p.pdfDoc=pdfDocArg;
+  } else if(p.pdfDoc){
+    pdfDocActual=p.pdfDoc;
+  } else if(p.url){
+    pdfDocActual=await pdfjsLib.getDocument(p.url).promise;
+    p.pdfDoc=pdfDocActual;
+  } else {
+    toast('Cargá el PDF nuevamente','err');
+    irHome();return;
+  }
+
+  await renderPagina(p.pagActual);
+  document.getElementById('page-ctrl').style.display=p.totalPags>1?'flex':'none';
+  setModo('nav');
+  renderLista();
+}
+
+async function reabrirPlano(id){
+  const guardado=await dbGet('planos',id);
+  if(!guardado){toast('No se encontró el plano','err');return}
+
+  // Guardar estado completo en memoria para cuando se cargue el PDF
+  pendingObs[guardado.nombre]={
+    obs:guardado.obs,
+    idCounter:guardado.idCounter,
+    id:guardado.id,
+    dropboxPath:guardado.dropboxPath||null
+  };
+
+  // Si tiene ruta de Dropbox, descargar automáticamente
+  if(guardado.dropboxPath){
+    toast('Cargando desde Dropbox…','');
+    try{
+      const token=await obtenerAccessToken();
+      const linkData=await obtenerLinkTemporal(token, guardado.dropboxPath);
+      const res=await fetch(linkData.link);
+      const buffer=await res.arrayBuffer();
+      await abrirNuevoPlano(buffer, guardado.nombre, guardado.dropboxPath);
+    }catch(e){
+      toast('Error al cargar desde Dropbox. Cargá el PDF manualmente.','err');
+      document.getElementById('file-home').click();
+    }
+  } else {
+    // Sin ruta Dropbox — pedir que lo carguen manualmente
+    toast(`Cargá el PDF "${guardado.nombre}" para ver las observaciones`,'');
+    document.getElementById('file-home').click();
+  }
+}
+
+async function cerrarPlano(id, mostrarToast=true){
+  const idx=planosAbiertos.findIndex(p=>p.id===id);
+  if(idx===-1)return;
+  const p=planosAbiertos[idx];
+  // Guardar estado en DB
+  await dbPut('planos',{id:p.id,nombre:p.nombre,obs:p.obs,idCounter:p.idCounter,totalPags:p.totalPags,dropboxPath:p.dropboxPath||null});
+  planosAbiertos.splice(idx,1);
+
+  if(planoActualId===id){
+    planoActualId=planosAbiertos.length?planosAbiertos[planosAbiertos.length-1].id:null;
+    if(planoActualId) await activarPlano(planoActualId);
+    else irHome();
+  }
+  renderTabs();
+  renderHomeUI();
+  if(mostrarToast) toast('Plano cerrado','ok');
+}
+
+async function eliminarHistorial(id){
+  await dbDel('planos',id);
+  renderHistorial();
+}
+
+// ── Tabs ───────────────────────────────────────────────────────
+function renderTabs(){
+  const cont=document.getElementById('tabs-container');
+  cont.innerHTML=planosAbiertos.map(p=>`
+    <div class="ptab${p.id===planoActualId?' active':''}" onclick="activarPlano('${p.id}')">
+      <span class="ptab-name">${p.nombre.replace('.pdf','')}</span>
+      <button class="ptab-close" onclick="event.stopPropagation();cerrarPlano('${p.id}')" title="Cerrar">✕</button>
+    </div>
+  `).join('');
+}
+
+// ── PDF render ─────────────────────────────────────────────────
+const canvas=document.getElementById('pdf-canvas');
+const ctx=canvas.getContext('2d');
+
+async function renderPagina(n){
+  if(!pdfDocActual||renderizando)return;
+  renderizando=true;
+  const p=planoActual();
+  if(!p){renderizando=false;return}
+  p.pagActual=n;
+  const page=await pdfDocActual.getPage(n);
+  const vp=page.getViewport({scale:p.escala});
+  canvas.width=vp.width;canvas.height=vp.height;
+  await page.render({canvasContext:ctx,viewport:vp}).promise;
+  canvas.style.transform=`translate(${p.offsetX}px,${p.offsetY}px)`;
+  document.getElementById('page-info').textContent=`Pág ${n} / ${p.totalPags}`;
+  renderizando=false;
+  renderMarcadores();
+}
+
+async function cambiarPag(delta){
+  const p=planoActual();if(!p)return;
+  const nueva=p.pagActual+delta;
+  if(nueva<1||nueva>p.totalPags)return;
+  await renderPagina(nueva);
+}
+
+// ── Pan & zoom ─────────────────────────────────────────────────
+const area=document.getElementById('canvas-area');
+let dragging=false,dragStart={};
+let lastTouch=null,pinchDist=null;
+
+area.addEventListener('mousedown',e=>{
+  if(modo==='nav'){dragging=true;const p=planoActual();dragStart={x:e.clientX-(p?.offsetX||0),y:e.clientY-(p?.offsetY||0)}}
+});
+area.addEventListener('mousemove',e=>{
+  if(dragging){const p=planoActual();if(!p)return;p.offsetX=e.clientX-dragStart.x;p.offsetY=e.clientY-dragStart.y;aplicarTransform()}
+});
+area.addEventListener('mouseup',()=>dragging=false);
+area.addEventListener('mouseleave',()=>dragging=false);
+
+area.addEventListener('touchstart',e=>{
+  if(e.touches.length===1&&modo==='nav'){const p=planoActual();if(!p)return;lastTouch={x:e.touches[0].clientX-p.offsetX,y:e.touches[0].clientY-p.offsetY}}
+  if(e.touches.length===2)pinchDist=dist(e.touches);
+},{passive:true});
+area.addEventListener('touchmove',e=>{
+  if(e.touches.length===1&&modo==='nav'&&lastTouch){const p=planoActual();if(!p)return;p.offsetX=e.touches[0].clientX-lastTouch.x;p.offsetY=e.touches[0].clientY-lastTouch.y;aplicarTransform()}
+  if(e.touches.length===2&&pinchDist){
+    e.preventDefault(); // evita zoom de Safari
+    const p=planoActual();if(!p)return;
+    const d=dist(e.touches);
+    p.escala=Math.max(0.3,Math.min(5,p.escala*(d/pinchDist)));
+    pinchDist=d;renderPagina(p.pagActual);actualizarZoomLabel();
+  }
+},{passive:false});
+area.addEventListener('touchend',()=>{lastTouch=null;pinchDist=null});
+
+function dist(t){const dx=t[0].clientX-t[1].clientX,dy=t[0].clientY-t[1].clientY;return Math.sqrt(dx*dx+dy*dy)}
+
+function aplicarTransform(){
+  const p=planoActual();if(!p)return;
+  canvas.style.transform=`translate(${p.offsetX}px,${p.offsetY}px)`;
+  document.querySelectorAll('.marker').forEach(m=>{
+    m.style.left=(parseFloat(m.dataset.ox)*p.escala+p.offsetX)+'px';
+    m.style.top=(parseFloat(m.dataset.oy)*p.escala+p.offsetY)+'px';
+  });
+}
+
+function zoom(factor){
+  const p=planoActual();if(!p)return;
+  p.escala=Math.max(0.3,Math.min(5,p.escala*factor));
+  renderPagina(p.pagActual);actualizarZoomLabel();
+}
+function actualizarZoomLabel(){
+  const p=planoActual();
+  document.getElementById('zoom-label').textContent=p?Math.round(p.escala*100/1.5)+'%':'100%';
+}
+
+// ── Rubros y responsables ─────────────────────────────────────
+const RUBROS_RESP={
+  'Agua':['Capataz','Plomero','Otro'],
+  'Aire Acondicionado':['Capataz','Subcontratista','Otro'],
+  'Carpintería aluminio':['Capataz','Subcontratista','Otro'],
+  'Cerámico':['Capataz','Subcontratista','Otro'],
+  'Cloaca y pluvial':['Capataz','Plomero','Otro'],
+  'Durlock':['Capataz','Durlero','Otro'],
+  'Electricidad':['Capataz','Electricista','Otro'],
+  'Estructura':['Capataz','Puntero','Otro'],
+  'Gas':['Capataz','Plomero','Otro'],
+  'Incendio':['Capataz','Plomero','Otro'],
+  'Mampostería':['Capataz','Otro'],
+  'Marcos y premarcos':['Capataz','Subcontratista','Otro'],
+  'Marmoles':['Capataz','Subcontratista','Otro'],
+  'Metalúrgica':['Capataz','Subcontratista','Otro'],
+  'Muebles':['Capataz','Subcontratista','Otro'],
+  'Pintura':['Capataz','Subcontratista','Otro'],
+  'Replanteo':['Capataz','Puntero','Otro'],
+  'Revoque y Contrapiso':['Capataz','Subcontratista','Otro'],
+  'Terminaciones':['Capataz','Subcontratista','Otro'],
+  'Yeso':['Capataz','Subcontratista','Otro'],
+  'Zócalos':['Capataz','Subcontratista','Otro'],
+};
+
+function setEstado(e){
+  estadoActual=e;
+  document.getElementById('btn-pendiente').classList.toggle('sel',e==='pendiente');
+  document.getElementById('btn-resuelta').classList.toggle('sel',e==='resuelta');
+  document.getElementById('nota-resolucion-field').style.display=e==='resuelta'?'block':'none';
+}
+
+function toggleOtroResponsable(){
+  const sel=document.getElementById('inp-responsable');
+  const field=document.getElementById('otro-resp-field');
+  field.style.display=sel.value==='Otro'?'block':'none';
+  if(sel.value!=='Otro') document.getElementById('inp-otro-resp').value='';
+}
+
+function actualizarResponsables(valorActual){
+  const rubro=document.getElementById('inp-rubro').value;
+  const sel=document.getElementById('inp-responsable');
+  const opciones=RUBROS_RESP[rubro]||['Capataz','Otro'];
+  sel.innerHTML='<option value="">— Sin asignar —</option>'+
+    opciones.map(r=>`<option${valorActual===r?' selected':''}>${r}</option>`).join('');
+}
+
+// ── Modo marcar ────────────────────────────────────────────────
+function setModo(m){
+  modo=m;
+  document.getElementById('btn-nav').classList.toggle('active',m==='nav');
+  document.getElementById('btn-marcar').classList.toggle('active',m==='marcar');
+  area.className=m==='marcar'?'modo-marcar':'';
+}
+
+// Click/touch solo sobre el canvas PDF, no sobre el área vacía
+canvas.addEventListener('click',e=>{
+  if(modo!=='marcar'||!pdfDocActual)return;
+  e.stopPropagation();
+  const p=planoActual();if(!p)return;
+  crearMarcador(e.clientX,e.clientY,p);
+});
+let touchClick=false,touchTarget=null;
+canvas.addEventListener('touchstart',e=>{
+  if(modo==='marcar'&&e.touches.length===1){touchClick=true;touchTarget=e.target}
+},{passive:true});
+canvas.addEventListener('touchend',e=>{
+  if(touchClick&&modo==='marcar'&&e.changedTouches.length===1){
+    const t=e.changedTouches[0];
+    const p=planoActual();if(!p||!pdfDocActual)return;
+    crearMarcador(t.clientX,t.clientY,p);
+  }
+  touchClick=false;touchTarget=null;
+},{passive:true});
+canvas.addEventListener('touchmove',()=>touchClick=false,{passive:true});
+// En el área general (fuera del canvas) nunca marcar
+area.addEventListener('click',e=>{if(e.target===area||e.target===document.getElementById('drop-zone'))e.stopPropagation()});
+
+function crearMarcador(clientX,clientY,p){
+  const rect=area.getBoundingClientRect();
+  const px=(clientX-rect.left-p.offsetX)/p.escala;
+  const py=(clientY-rect.top-p.offsetY)/p.escala;
+  const id=`OBS-${String(p.idCounter).padStart(2,'0')}`;
+  p.idCounter++;
+  const obs={id,plano:p.nombre,pagina:p.pagActual,px:parseFloat(px.toFixed(1)),py:parseFloat(py.toFixed(1)),
+    rubro:'Agua',desc:'',sev:sevActual,responsable:'',foto:null,
+    estado:'pendiente',notaResolucion:'',fechaResolucion:null,
+    fecha:new Date().toISOString(),sinc:false};
+  p.obs.push(obs);
+  dbPut('planos',{id:p.id,nombre:p.nombre,obs:p.obs,idCounter:p.idCounter,totalPags:p.totalPags,dropboxPath:p.dropboxPath||null});
+  obsActiva=id;
+  abrirFormulario(obs);
+  renderMarcadores();
+  renderLista();
+  switchTab('form');
+  abrirPanelMobile();
+}
+
+// ── Marcadores DOM ─────────────────────────────────────────────
+function renderMarcadores(){
+  document.querySelectorAll('.marker').forEach(m=>m.remove());
+  const p=planoActual();if(!p)return;
+  p.obs.filter(o=>o.pagina===p.pagActual).forEach(o=>{
+    const el=document.createElement('div');
+    el.className=`marker ${o.sev}${obsActiva===o.id?' activo':''}${o.estado==='resuelta'?' resuelta':''}`;
+    el.dataset.ox=o.px;el.dataset.oy=o.py;
+    el.style.left=(o.px*p.escala+p.offsetX)+'px';
+    el.style.top=(o.py*p.escala+p.offsetY)+'px';
+    el.innerHTML=`<span class="marker-inner">${o.id.replace('OBS-','')}</span>`;
+    el.addEventListener('click',ev=>{ev.stopPropagation();selObs(o.id)});
+    area.appendChild(el);
+  });
+}
+
+// ── Formulario ─────────────────────────────────────────────────
+function abrirFormulario(obs){
+  document.getElementById('form-hint').style.display='none';
+  document.getElementById('form-fields').style.display='flex';
+  document.getElementById('estado-field').style.display='none';
+  document.getElementById('nota-resolucion-field').style.display='none';
+  document.getElementById('obs-id-badge').innerHTML=`${obs.id} <small>· p.${obs.pagina}</small>`;
+  document.getElementById('inp-rubro').value=obs.rubro;
+  document.getElementById('inp-desc').value=obs.desc;
+  // Si el responsable no está en la lista estándar, es un "Otro" personalizado
+  const rubResp=RUBROS_RESP[obs.rubro]||['Capataz','Otro'];
+  const esOtroPersonalizado=obs.responsable&&!rubResp.includes(obs.responsable)&&obs.responsable!=='';
+  actualizarResponsables(esOtroPersonalizado?'Otro':obs.responsable);
+  if(esOtroPersonalizado){
+    document.getElementById('inp-otro-resp').value=obs.responsable;
+    document.getElementById('otro-resp-field').style.display='block';
+  } else {
+    document.getElementById('inp-otro-resp').value='';
+    document.getElementById('otro-resp-field').style.display='none';
+  }
+  sevActual=obs.sev;
+  document.querySelectorAll('.sev-btn').forEach(b=>{b.classList.remove('sel');if(b.classList.contains(obs.sev))b.classList.add('sel')});
+  fotoDataUrl=obs.foto;
+  const prev=document.getElementById('foto-preview');
+  if(obs.foto){prev.src=obs.foto;prev.style.display='block'}else{prev.style.display='none'}
+  // Estado y nota resolución — solo visible al editar obs existente
+  document.getElementById('estado-field').style.display='block';
+  estadoActual=obs.estado||'pendiente';
+  setEstado(estadoActual);
+  document.getElementById('inp-nota-resolucion').value=obs.notaResolucion||'';
+}
+
+function selObs(id){
+  obsActiva=id;
+  const p=planoActual();if(!p)return;
+  const obs=p.obs.find(o=>o.id===id);
+  if(obs)abrirFormulario(obs);
+  renderMarcadores();renderLista();switchTab('form');abrirPanelMobile();
+}
+
+function setSev(btn,s){
+  sevActual=s;
+  document.querySelectorAll('.sev-btn').forEach(b=>b.classList.remove('sel'));
+  btn.classList.add('sel');
+}
+
+function previewFoto(e){
+  const file=e.target.files[0];if(!file)return;
+  const reader=new FileReader();
+  reader.onload=ev=>{fotoDataUrl=ev.target.result;const prev=document.getElementById('foto-preview');prev.src=fotoDataUrl;prev.style.display='block'};
+  reader.readAsDataURL(file);
+}
+
+function guardarObservacion(){
+  if(!obsActiva)return;
+  const p=planoActual();if(!p)return;
+  const obs=p.obs.find(o=>o.id===obsActiva);if(!obs)return;
+  obs.rubro=document.getElementById('inp-rubro').value;
+  obs.desc=document.getElementById('inp-desc').value.trim();
+  obs.sev=sevActual;
+  const respSel=document.getElementById('inp-responsable').value;
+  const otroResp=document.getElementById('inp-otro-resp').value.trim();
+  obs.responsable=respSel==='Otro'&&otroResp?otroResp:respSel;
+  obs.foto=fotoDataUrl;
+  // Estado y resolución
+  const estadoAnterior=obs.estado||'pendiente';
+  obs.estado=estadoActual;
+  obs.notaResolucion=document.getElementById('inp-nota-resolucion').value.trim();
+  if(estadoActual==='resuelta'&&estadoAnterior!=='resuelta'){
+    obs.fechaResolucion=new Date().toISOString();
+  } else if(estadoActual==='pendiente'){
+    obs.fechaResolucion=null;
+  }
+  obs.sinc=false; // siempre marcar como no sincronizada al editar
+  // Guardar inmediatamente en DB para que persista aunque no se certifique
+  await dbPut('planos',{id:p.id,nombre:p.nombre,obs:p.obs,idCounter:p.idCounter,totalPags:p.totalPags,dropboxPath:p.dropboxPath||null});
+  renderMarcadores();renderLista();
+  toast(`${obs.id} guardada ✓`,'ok');
+  document.getElementById('inp-desc').value='';
+  fotoDataUrl=null;document.getElementById('foto-preview').style.display='none';
+}
+
+function eliminarActual(){
+  if(!obsActiva)return;
+  const p=planoActual();if(!p)return;
+  if(!confirm(`¿Eliminar ${obsActiva}?`))return;
+  p.obs=p.obs.filter(o=>o.id!==obsActiva);
+  dbPut('planos',{id:p.id,nombre:p.nombre,obs:p.obs,idCounter:p.idCounter,totalPags:p.totalPags,dropboxPath:p.dropboxPath||null});
+  obsActiva=null;
+  document.getElementById('form-hint').style.display='';
+  document.getElementById('form-fields').style.display='none';
+  renderMarcadores();renderLista();toast('Eliminada','');
+}
+
+// ── Lista ──────────────────────────────────────────────────────
+function renderLista(){
+  const p=planoActual();
+  const obs=p?p.obs:[];
+  document.getElementById('lista-count').textContent=obs.length;
+  document.getElementById('lista-resumen').textContent=`${obs.length} observación${obs.length!==1?'es':''}`;
+  const lista=document.getElementById('obs-lista');
+  if(!obs.length){lista.innerHTML='<div class="lista-empty">Sin observaciones aún.<br>Activá Marcar y tocá el plano.</div>';return}
+  const sOrd={alta:0,media:1,baja:2};
+  lista.innerHTML=[...obs].sort((a,b)=>sOrd[a.sev]-sOrd[b.sev]).map(o=>`
+    <div class="obs-item${obsActiva===o.id?' activo':''}" onclick="selObs('${o.id}')">
+      <div class="obs-pin ${o.sev}"><span>${o.id.replace('OBS-','')}</span></div>
+      <div class="obs-info">
+        <strong>${o.id}</strong>
+        <div class="obs-desc">${o.desc||'(sin descripción)'}</div>
+        <div class="obs-meta">${o.estado==='resuelta'?'🟢 Resuelta':'🔴 Pendiente'} · ${o.rubro}${o.responsable?' · '+o.responsable:''}${!o.sinc?' · ⏳':' · ✓'}</div>
+      </div>
+    </div>
+  `).join('');
+}
+
+// ── Panel tabs ─────────────────────────────────────────────────
+function switchTab(t){
+  document.getElementById('tab-form').classList.toggle('hidden',t!=='form');
+  document.getElementById('tab-lista').classList.toggle('hidden',t!=='lista');
+  document.getElementById('tab-btn-form').classList.toggle('active',t==='form');
+  document.getElementById('tab-btn-lista').classList.toggle('active',t==='lista');
+}
+
+// ── Panel móvil ────────────────────────────────────────────────
+function togglePanel(){
+  const panel=document.getElementById('panel');
+  const btn=document.getElementById('btn-panel-toggle');
+  const abierto=panel.classList.toggle('abierto');
+  btn.classList.toggle('abierto',abierto);
+  btn.textContent=abierto?'✕':'✎';
+}
+function abrirPanelMobile(){
+  if(window.innerWidth<=640){
+    document.getElementById('panel').classList.add('abierto');
+    const btn=document.getElementById('btn-panel-toggle');
+    btn.classList.add('abierto');btn.textContent='✕';
+  }
+}
+
+// ── Dropbox OAuth2 ─────────────────────────────────────────────
+let dropboxAccessToken=null;
+let dropboxModalAbierto=false;
+
+async function obtenerAccessToken(){
+  if(dropboxAccessToken)return dropboxAccessToken;
+  const res=await fetch('https://api.dropboxapi.com/oauth2/token',{
+    method:'POST',
+    headers:{'Content-Type':'application/x-www-form-urlencoded'},
+    body:`grant_type=refresh_token&refresh_token=${CONFIG.DROPBOX_REFRESH_TOKEN}&client_id=${CONFIG.DROPBOX_APP_KEY}&client_secret=${CONFIG.DROPBOX_APP_SECRET}`
+  });
+  const data=await res.json();
+  if(!data.access_token)throw new Error('No se pudo obtener token de Dropbox');
+  dropboxAccessToken=data.access_token;
+  // Expirar token después de 3.5 horas
+  setTimeout(()=>dropboxAccessToken=null, 3.5*60*60*1000);
+  return dropboxAccessToken;
+}
+
+async function abrirDropbox(){
+  if(dropboxModalAbierto)return;
+  try{
+    toast('Conectando a Dropbox…','');
+    const token=await obtenerAccessToken();
+    await mostrarSelectorDropbox(token, CONFIG.DROPBOX_FOLDER);
+  }catch(e){
+    toast('Error al conectar con Dropbox','err');
+    console.error(e);
+  }
+}
+
+async function listarCarpeta(token, ruta){
+  const res=await fetch('https://api.dropboxapi.com/2/files/list_folder',{
+    method:'POST',
+    headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json'},
+    body:JSON.stringify({path:ruta, recursive:false})
+  });
+  return res.json();
+}
+
+async function listarCarpetaContinue(token, cursor){
+  const res=await fetch('https://api.dropboxapi.com/2/files/list_folder/continue',{
+    method:'POST',
+    headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json'},
+    body:JSON.stringify({cursor})
+  });
+  return res.json();
+}
+
+async function obtenerLinkTemporal(token, path){
+  const res=await fetch('https://api.dropboxapi.com/2/files/get_temporary_link',{
+    method:'POST',
+    headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json'},
+    body:JSON.stringify({path})
+  });
+  return res.json();
+}
+
+async function mostrarSelectorDropbox(token, ruta){
+  dropboxModalAbierto=true;
+  // Crear modal
+  const overlay=document.createElement('div');
+  overlay.id='dropbox-modal';
+  overlay.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:200;display:flex;align-items:center;justify-content:center;padding:16px';
+
+  overlay.innerHTML=`
+    <div style="background:var(--surface);border:0.5px solid var(--border2);border-radius:var(--r);width:100%;max-width:480px;max-height:80vh;display:flex;flex-direction:column;overflow:hidden">
+      <div style="padding:14px 16px;border-bottom:0.5px solid var(--border);display:flex;align-items:center;gap:10px">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="#0061ff"><path d="M6 2L0 6l6 4-6 4 6 4 6-4-6-4 6-4L6 2zm12 0l-6 4 6 4-6 4 6 4 6-4-6-4 6-4-6-4z"/></svg>
+        <span style="font-size:14px;font-weight:500;color:var(--text)">Elegir plano desde Dropbox</span>
+        <button onclick="cerrarModalDropbox()" style="margin-left:auto;background:none;border:none;color:var(--muted);font-size:18px;cursor:pointer">✕</button>
+      </div>
+      <div style="padding:10px 16px;border-bottom:0.5px solid var(--border);font-size:12px;color:var(--muted)" id="dropbox-ruta">${ruta}</div>
+      <div id="dropbox-lista" style="flex:1;overflow-y:auto;padding:8px"></div>
+    </div>`;
+
+  document.body.appendChild(overlay);
+  await cargarListaDropbox(token, ruta);
+}
+
+async function cargarListaDropbox(token, ruta){
+  const lista=document.getElementById('dropbox-lista');
+  lista.innerHTML='<div style="padding:20px;text-align:center;color:var(--muted);font-size:13px">Cargando…</div>';
+  document.getElementById('dropbox-ruta').textContent=ruta||'/';
+
+  try{
+    let data=await listarCarpeta(token, ruta||'');
+    let entries=[...data.entries];
+    while(data.has_more){
+      data=await listarCarpetaContinue(token,data.cursor);
+      entries=[...entries,...data.entries];
+    }
+
+    // Separar carpetas y PDFs
+    const carpetas=entries.filter(e=>e['.tag']==='folder').sort((a,b)=>a.name.localeCompare(b.name));
+    const pdfs=entries.filter(e=>e['.tag']==='file'&&e.name.toLowerCase().endsWith('.pdf')).sort((a,b)=>a.name.localeCompare(b.name));
+
+    if(!carpetas.length&&!pdfs.length){
+      lista.innerHTML='<div style="padding:20px;text-align:center;color:var(--hint);font-size:13px">Carpeta vacía</div>';
+      return;
+    }
+
+    // Botón volver si no estamos en la raíz
+    let html='';
+    if(ruta&&ruta!==''&&ruta!=='/'){
+      const parent=ruta.substring(0,ruta.lastIndexOf('/'))||'';
+      html+=`<div onclick="cargarListaDropbox(dropboxAccessToken,'${parent}')" style="padding:10px 14px;display:flex;align-items:center;gap:10px;cursor:pointer;border-bottom:0.5px solid var(--border);color:var(--muted);font-size:13px">
+        <span style="font-size:16px">←</span> Volver
+      </div>`;
+    }
+
+    carpetas.forEach(f=>{
+      html+=`<div onclick="cargarListaDropbox(dropboxAccessToken,'${f.path_lower}')" style="padding:10px 14px;display:flex;align-items:center;gap:10px;cursor:pointer;border-bottom:0.5px solid var(--border);transition:background 0.1s" onmouseover="this.style.background='var(--surface2)'" onmouseout="this.style.background=''">
+        <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" style="color:var(--accent);flex-shrink:0"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/></svg>
+        <span style="font-size:13px;color:var(--text)">${f.name}</span>
+        <span style="margin-left:auto;color:var(--hint);font-size:12px">›</span>
+      </div>`;
+    });
+
+    pdfs.forEach(f=>{
+      html+=`<div onclick="abrirPdfDropbox('${f.path_lower}','${f.name.replace(/'/g,"\'")}')" style="padding:10px 14px;display:flex;align-items:center;gap:10px;cursor:pointer;border-bottom:0.5px solid var(--border);transition:background 0.1s" onmouseover="this.style.background='var(--surface2)'" onmouseout="this.style.background=''">
+        <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" style="color:var(--muted);flex-shrink:0"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+        <span style="font-size:13px;color:var(--text)">${f.name}</span>
+      </div>`;
+    });
+
+    lista.innerHTML=html;
+  }catch(e){
+    lista.innerHTML='<div style="padding:20px;text-align:center;color:var(--danger);font-size:13px">Error al cargar archivos</div>';
+    console.error(e);
+  }
+}
+
+async function abrirPdfDropbox(path, nombre){
+  cerrarModalDropbox();
+  toast('Descargando '+nombre+'…','');
+  try{
+    const token=await obtenerAccessToken();
+    const linkData=await obtenerLinkTemporal(token,path);
+    const res=await fetch(linkData.link);
+    const buffer=await res.arrayBuffer();
+    await abrirNuevoPlano(buffer, nombre, path); // pasamos la ruta de Dropbox
+  }catch(e){
+    toast('Error al abrir el PDF','err');
+    console.error(e);
+  }
+}
+
+function cerrarModalDropbox(){
+  const modal=document.getElementById('dropbox-modal');
+  if(modal)modal.remove();
+  dropboxModalAbierto=false;
+}
+
+// ── Sincronizar ────────────────────────────────────────────────
+async function enviarObservaciones(obs){
+  if(!obs.length)return true;
+  const res=await fetch(CONFIG.APPS_SCRIPT_URL,{method:'POST',body:JSON.stringify({
+    obra:CONFIG.OBRA,
+    observaciones:obs.map(o=>({
+      id:o.id, plano:o.plano, pagina:o.pagina,
+      rubro:o.rubro, desc:o.desc, sev:o.sev,
+      responsable:o.responsable,
+      foto:o.foto?'Sí':'No',
+      fecha:new Date(o.fecha).toLocaleString('es-AR'),
+      estado:o.estado||'pendiente',
+      notaResolucion:o.notaResolucion||'',
+      fechaResolucion:o.fechaResolucion?new Date(o.fechaResolucion).toLocaleString('es-AR'):'',
+    }))
+  })});
+  return res.ok;
+}
+
+async function certificarPlano(){
+  const p=planoActual();if(!p)return;
+  const noSinc=p.obs.filter(o=>!o.sinc);
+  if(!noSinc.length){
+    toast('No hay observaciones nuevas para certificar','ok');
+    await cerrarPlano(p.id,false);
+    return;
+  }
+  if(!navigator.onLine){toast('Sin conexión. Conectate e intentá de nuevo.','err');return}
+  const btn=document.getElementById('btn-sync');
+  btn.disabled=true;btn.textContent='Certificando…';
+  try{
+    const ok=await enviarObservaciones(noSinc);
+    if(ok){
+      noSinc.forEach(o=>o.sinc=true);
+      await dbPut('planos',{id:p.id,nombre:p.nombre,obs:p.obs,idCounter:p.idCounter,totalPags:p.totalPags,dropboxPath:p.dropboxPath||null});
+      toast(`${noSinc.length} obs. certificadas ✓`,'ok');
+      setTimeout(()=>cerrarPlano(p.id,false),1000);
+    } else throw new Error();
+  }catch{toast('Error al certificar. Intentá de nuevo.','err')}
+  finally{btn.disabled=false;btn.textContent='✓ Certificar'}
+}
+
+// ── Exportar CSV ───────────────────────────────────────────────
+function exportarCSV(){
+  const p=planoActual();if(!p||!p.obs.length){toast('Sin observaciones','err');return}
+  const cols=['ID','Plano','Página','Rubro','Descripción','Severidad','Responsable','Fecha','Foto'];
+  const rows=p.obs.map(o=>[o.id,o.plano,o.pagina,o.rubro,o.desc,o.sev,o.responsable,
+    new Date(o.fecha).toLocaleString('es-AR'),o.foto?'Sí':'No']);
+  const csv=[cols,...rows].map(r=>r.map(c=>`"${String(c??'').replace(/"/g,'""')}"`).join(',')).join('\n');
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob(['\uFEFF'+csv],{type:'text/csv;charset=utf-8'}));
+  a.download=`obs_${p.nombre.replace('.pdf','')}_${new Date().toISOString().slice(0,10)}.csv`;
+  a.click();toast('CSV descargado','ok');
+}
+
+// ── Toast ──────────────────────────────────────────────────────
+let toastTimer;
+function toast(msg,tipo){
+  const el=document.getElementById('toast');
+  el.textContent=msg;el.className='show'+(tipo?' '+tipo:'');
+  clearTimeout(toastTimer);toastTimer=setTimeout(()=>el.className='',3000);
+}
+
+// ── Online/Offline ─────────────────────────────────────────────
+function actualizarConexion(){
+  const online=navigator.onLine;
+  ['home-badge','insp-sync-badge'].forEach(id=>{
+    const el=document.getElementById(id);
+    el.className=`home-sync-badge ${online?'online':'offline'}`;
+  });
+  document.getElementById('home-badge-txt').textContent=online?'Online':'Sin conexión';
+  document.getElementById('insp-badge-txt').textContent=online?'Online':'Sin conexión';
+}
+window.addEventListener('online',actualizarConexion);
+window.addEventListener('offline',actualizarConexion);
+
+// ── Init ───────────────────────────────────────────────────────
+async function init(){
+  await initDB();
+  actualizarConexion();
+  irHome();
+  renderHomeUI();
+
+  // Registrar service worker
+  if('serviceWorker' in navigator){
+    navigator.serviceWorker.register('/sw.js').catch(()=>{});
+  }
+}
+init();
+</script>
+</body>
+</html>
