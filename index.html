@@ -535,6 +535,20 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--f
 <script>
 pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 
+// Mostrar estado de conexión inmediatamente al cargar
+document.addEventListener('DOMContentLoaded', ()=>{
+  const online = navigator.onLine;
+  ['home-badge','insp-sync-badge'].forEach(id=>{
+    const el=document.getElementById(id);
+    if(!el)return;
+    el.className=`home-sync-badge ${online?'online':'offline'}`;
+  });
+  const h=document.getElementById('home-badge-txt');
+  const i=document.getElementById('insp-badge-txt');
+  if(h)h.textContent=online?'Online':'Sin conexión';
+  if(i)i.textContent=online?'Online':'Sin conexión';
+});
+
 const CONFIG={
   APPS_SCRIPT_URL:'https://script.google.com/macros/s/AKfycbxBMLwyI4TL8pERW9KyWaVca5lz5EK0fBDGscGyefxUPhZA_4H_tGaQ7lGTShLILnGYIg/exec',
   DROPBOX_APP_KEY:'qw79ab7qqu953as',
@@ -1422,20 +1436,27 @@ window.addEventListener('offline',actualizarConexion);
 
 // ── Init ───────────────────────────────────────────────────────
 async function init(){
-  await initDB();
-  contadorGlobal=getContadorGlobal();
+  try{
+    await initDB();
+  }catch(e){
+    console.error('Error initDB:',e);
+    // Continuar aunque falle la DB
+  }
+  try{
+    contadorGlobal=getContadorGlobal();
+  }catch(e){contadorGlobal=0}
   actualizarConexion();
   irHome();
   renderHomeUI();
 
-  // Sin service worker — evitar problemas de caché
+  // Desregistrar service workers viejos
   if('serviceWorker' in navigator){
     navigator.serviceWorker.getRegistrations().then(regs=>{
       regs.forEach(r=>r.unregister());
     });
   }
 }
-init();
+init().catch(e=>console.error('Error init:',e));
 </script>
 </body>
 </html>
