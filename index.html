@@ -724,7 +724,7 @@ async function abrirNuevoPlano(arrayBuffer,nombre,dropboxPath){
       idCounterInicial=prev.idCounter||1;
       idPlano=prev.id; // reutilizar el mismo ID de DB
       dropboxPathGuardado=dropboxPath||prev.dropboxPath||null;
-      console.log('Cargando plano desde DB:',nombre,'id:',idPlano,'obs:',obsIniciales.length,'estados:',obsIniciales.map(o=>o.id+':'+o.estado).join(', '));
+      toast(`DB: ${obsIniciales.length} obs cargadas — ${obsIniciales.map(o=>o.id+':'+o.estado).join(', ')}`,'ok');
     }
   }
 
@@ -1124,13 +1124,11 @@ function guardarObservacion(){
     const verificar=await dbGet('planos',p.id);
     const obsGuardada=verificar&&verificar.obs?verificar.obs.find(o=>o.id===obs.id):null;
     const estadoVerif=obsGuardada?obsGuardada.estado:'no encontrada';
-    console.log('DB guardada — plano id:',p.id,'obs:',obs.id,'estado en DB:',estadoVerif,'estado en memoria:',obs.estado,'total obs en DB:',verificar?verificar.obs.length:0);
     renderMarcadores();renderLista();
     if(estadoVerif===obs.estado){
-      toast(`${obs.id} guardada ✓`,'ok');
+      toast(`${obs.id} guardada — DB:${estadoVerif} ✓`,'ok');
     } else {
-      toast(`Error: estado no coincide (${obs.estado} vs ${estadoVerif})','err');
-      console.error('MISMATCH — estado en memoria:',obs.estado,'estado en DB:',estadoVerif);
+      toast(`Error DB: esperaba ${obs.estado} pero guardó ${estadoVerif}`,'err');
     }
   }catch(e){
     console.error('Error al guardar en DB:',e);
