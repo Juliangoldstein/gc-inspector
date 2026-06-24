@@ -1104,9 +1104,19 @@ function guardarObservacion(){
   }
   obs.sinc=false; // siempre marcar como no sincronizada al editar
   // Guardar inmediatamente en DB para que persista aunque no se certifique
-  await dbPut('planos',{id:p.id,nombre:p.nombre,obs:p.obs,idCounter:p.idCounter,totalPags:p.totalPags,dropboxPath:p.dropboxPath||null});
-  renderMarcadores();renderLista();
-  toast(`${obs.id} guardada ✓`,'ok');
+  try{
+    await dbPut('planos',{id:p.id,nombre:p.nombre,obs:p.obs,idCounter:p.idCounter,totalPags:p.totalPags,dropboxPath:p.dropboxPath||null});
+    // Verificar que se guardó correctamente
+    const verificar=await dbGet('planos',p.id);
+    const obsGuardada=verificar&&verificar.obs?verificar.obs.find(o=>o.id===obs.id):null;
+    const estadoVerif=obsGuardada?obsGuardada.estado:'no encontrada';
+    console.log('DB guardada — obs:',obs.id,'estado en DB:',estadoVerif,'estado en memoria:',obs.estado);
+    renderMarcadores();renderLista();
+    toast(`${obs.id} guardada (${estadoVerif}) ✓`,'ok');
+  }catch(e){
+    console.error('Error al guardar en DB:',e);
+    toast('Error al guardar localmente','err');
+  }
   document.getElementById('inp-desc').value='';
   fotoDataUrl=null;document.getElementById('foto-preview').style.display='none';
 }
