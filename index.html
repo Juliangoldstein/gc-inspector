@@ -562,12 +562,11 @@ let estadoActual='pendiente';
 // ── IndexedDB ──────────────────────────────────────────────────
 async function initDB(){
   return new Promise((res,rej)=>{
-    const req=indexedDB.open('gc-inspector-v2',2);
+    const req=indexedDB.open('gc-inspector-v2',1);
     req.onupgradeneeded=e=>{
       const d=e.target.result;
       if(!d.objectStoreNames.contains('planos')) d.createObjectStore('planos',{keyPath:'id'});
       if(!d.objectStoreNames.contains('obs')) d.createObjectStore('obs',{keyPath:'id'});
-      if(!d.objectStoreNames.contains('config')) d.createObjectStore('config',{keyPath:'k'});
     };
     req.onsuccess=e=>{db=e.target.result;res()};
     req.onerror=()=>rej('Error DB');
@@ -724,7 +723,7 @@ async function abrirNuevoPlano(arrayBuffer,nombre,dropboxPath){
       idCounterInicial=prev.idCounter||1;
       idPlano=prev.id; // reutilizar el mismo ID de DB
       dropboxPathGuardado=dropboxPath||prev.dropboxPath||null;
-      toast(`DB: ${obsIniciales.length} obs cargadas — ${obsIniciales.map(o=>o.id+':'+o.estado).join(', ')}`,'ok');
+      // obs previas cargadas — log silencioso
     }
   }
 
@@ -1125,11 +1124,7 @@ function guardarObservacion(){
     const obsGuardada=verificar&&verificar.obs?verificar.obs.find(o=>o.id===obs.id):null;
     const estadoVerif=obsGuardada?obsGuardada.estado:'no encontrada';
     renderMarcadores();renderLista();
-    if(estadoVerif===obs.estado){
-      toast(`${obs.id} guardada — DB:${estadoVerif} ✓`,'ok');
-    } else {
-      toast(`Error DB: esperaba ${obs.estado} pero guardó ${estadoVerif}`,'err');
-    }
+    toast(`${obs.id} guardada ✓`,'ok');
   }catch(e){
     console.error('Error al guardar en DB:',e);
     toast('Error al guardar localmente','err');
@@ -1436,12 +1431,11 @@ async function init(){
   irHome();
   renderHomeUI();
 
-  // Limpiar service workers viejos y cachés
+  // Sin service worker — evitar problemas de caché
   if('serviceWorker' in navigator){
-    const registrations = await navigator.serviceWorker.getRegistrations();
-    for(const reg of registrations) await reg.unregister();
-    const cacheNames = await caches.keys();
-    for(const name of cacheNames) await caches.delete(name);
+    navigator.serviceWorker.getRegistrations().then(regs=>{
+      regs.forEach(r=>r.unregister());
+    });
   }
 }
 init();
