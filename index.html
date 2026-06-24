@@ -1413,15 +1413,8 @@ function toast(msg,tipo){
 }
 
 // ── Online/Offline ─────────────────────────────────────────────
-async function actualizarConexion(){
-  // Usar navigator.onLine + verificar con el Apps Script propio
-  let online=navigator.onLine;
-  if(online){
-    try{
-      const res=await fetch(CONFIG.APPS_SCRIPT_URL,{method:'GET',cache:'no-store'});
-      online=res.ok;
-    }catch(e){online=false}
-  }
+function actualizarConexion(){
+  const online=navigator.onLine;
   ['home-badge','insp-sync-badge'].forEach(id=>{
     const el=document.getElementById(id);
     if(!el)return;
@@ -1434,8 +1427,6 @@ async function actualizarConexion(){
 }
 window.addEventListener('online',actualizarConexion);
 window.addEventListener('offline',actualizarConexion);
-// Verificar conexión cada 30 segundos
-setInterval(actualizarConexion, 30000);
 
 // ── Init ───────────────────────────────────────────────────────
 async function init(){
