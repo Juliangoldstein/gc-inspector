@@ -1413,17 +1413,31 @@ function toast(msg,tipo){
 }
 
 // ── Online/Offline ─────────────────────────────────────────────
-function actualizarConexion(){
-  const online=navigator.onLine;
+async function actualizarConexion(){
+  // Ping real en lugar de navigator.onLine (más confiable en iOS Safari)
+  let online=false;
+  try{
+    const res=await fetch('https://www.google.com/favicon.ico?_='+Date.now(),{
+      method:'HEAD', mode:'no-cors', cache:'no-store'
+    });
+    online=true;
+  }catch(e){
+    online=navigator.onLine;
+  }
   ['home-badge','insp-sync-badge'].forEach(id=>{
     const el=document.getElementById(id);
+    if(!el)return;
     el.className=`home-sync-badge ${online?'online':'offline'}`;
   });
-  document.getElementById('home-badge-txt').textContent=online?'Online':'Sin conexión';
-  document.getElementById('insp-badge-txt').textContent=online?'Online':'Sin conexión';
+  const homeTxt=document.getElementById('home-badge-txt');
+  const inspTxt=document.getElementById('insp-badge-txt');
+  if(homeTxt)homeTxt.textContent=online?'Online':'Sin conexión';
+  if(inspTxt)inspTxt.textContent=online?'Online':'Sin conexión';
 }
 window.addEventListener('online',actualizarConexion);
 window.addEventListener('offline',actualizarConexion);
+// Verificar conexión cada 30 segundos
+setInterval(actualizarConexion, 30000);
 
 // ── Init ───────────────────────────────────────────────────────
 async function init(){
