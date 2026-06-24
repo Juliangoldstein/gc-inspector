@@ -1,6 +1,6 @@
 // GC Inspector — Service Worker
 // Versión de caché: incrementar al actualizar la app
-const CACHE = 'gc-inspector-v1';
+const CACHE = 'gc-inspector-v3';
 
 const PRECACHE = [
   '/',
