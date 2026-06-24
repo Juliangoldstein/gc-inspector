@@ -573,14 +573,11 @@ async function initDB(){
   });
 }
 
-async function getContadorGlobal(){
-  try{
-    const res=await dbGet('config','obsCounter');
-    return res?res.valor:0;
-  }catch(e){return 0}
+function getContadorGlobal(){
+  return parseInt(localStorage.getItem('gc-obs-counter')||'0');
 }
-async function setContadorGlobal(n){
-  await dbPut('config',{k:'obsCounter',valor:n});
+function setContadorGlobal(n){
+  localStorage.setItem('gc-obs-counter', String(n));
 }
 
 async function dbGet(store,key){
@@ -1010,7 +1007,7 @@ async function crearMarcador(clientX,clientY,p){
   const px=(clientX-rect.left-p.offsetX)/p.escala;
   const py=(clientY-rect.top-p.offsetY)/p.escala;
   contadorGlobal++;
-  await setContadorGlobal(contadorGlobal);
+  setContadorGlobal(contadorGlobal);
   const id=`OBS-${String(contadorGlobal).padStart(2,'0')}`;
   const obs={id,plano:p.nombre,pagina:p.pagActual,px:parseFloat(px.toFixed(1)),py:parseFloat(py.toFixed(1)),
     rubro:'Agua',desc:'',sev:sevActual,responsable:'',foto:null,
@@ -1426,7 +1423,7 @@ window.addEventListener('offline',actualizarConexion);
 // ── Init ───────────────────────────────────────────────────────
 async function init(){
   await initDB();
-  contadorGlobal=await getContadorGlobal();
+  contadorGlobal=getContadorGlobal();
   actualizarConexion();
   irHome();
   renderHomeUI();
