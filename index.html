@@ -549,6 +549,7 @@ const CONFIG={
 let planosAbiertos=[];   // [{id, nombre, pdfDoc, pagActual, escala, offsetX, offsetY, obs:[]}]
 let planoActualId=null;
 let pendingObs={};  // {nombreArchivo: {obs:[], idCounter:N}} — observaciones previas esperando PDF
+let contadorGlobal=0; // contador global de observaciones entre todos los planos
 let db;
 let modo='nav';
 let sevActual='media';
@@ -561,15 +562,26 @@ let estadoActual='pendiente';
 // ── IndexedDB ──────────────────────────────────────────────────
 async function initDB(){
   return new Promise((res,rej)=>{
-    const req=indexedDB.open('gc-inspector-v2',1);
+    const req=indexedDB.open('gc-inspector-v2',2);
     req.onupgradeneeded=e=>{
       const d=e.target.result;
       if(!d.objectStoreNames.contains('planos')) d.createObjectStore('planos',{keyPath:'id'});
       if(!d.objectStoreNames.contains('obs')) d.createObjectStore('obs',{keyPath:'id'});
+      if(!d.objectStoreNames.contains('config')) d.createObjectStore('config',{keyPath:'k'});
     };
     req.onsuccess=e=>{db=e.target.result;res()};
     req.onerror=()=>rej('Error DB');
   });
+}
+
+async function getContadorGlobal(){
+  try{
+    const res=await dbGet('config','obsCounter');
+    return res?res.valor:0;
+  }catch(e){return 0}
+}
+async function setContadorGlobal(n){
+  await dbPut('config',{k:'obsCounter',valor:n});
 }
 
 async function dbGet(store,key){
@@ -712,6 +724,7 @@ async function abrirNuevoPlano(arrayBuffer,nombre,dropboxPath){
       idCounterInicial=prev.idCounter||1;
       idPlano=prev.id; // reutilizar el mismo ID de DB
       dropboxPathGuardado=dropboxPath||prev.dropboxPath||null;
+      console.log('Cargando plano desde DB:',nombre,'id:',idPlano,'obs:',obsIniciales.length,'estados:',obsIniciales.map(o=>o.id+':'+o.estado).join(', '));
     }
   }
 
@@ -975,7 +988,7 @@ canvas.addEventListener('click',e=>{
   if(modo!=='marcar'||!pdfDocActual)return;
   e.stopPropagation();
   const p=planoActual();if(!p)return;
-  crearMarcador(e.clientX,e.clientY,p);
+  await crearMarcador(e.clientX,e.clientY,p);
 });
 let touchClick=false,touchTarget=null;
 canvas.addEventListener('touchstart',e=>{
@@ -985,7 +998,7 @@ canvas.addEventListener('touchend',e=>{
   if(touchClick&&modo==='marcar'&&e.changedTouches.length===1){
     const t=e.changedTouches[0];
     const p=planoActual();if(!p||!pdfDocActual)return;
-    crearMarcador(t.clientX,t.clientY,p);
+    await crearMarcador(t.clientX,t.clientY,p);
   }
   touchClick=false;touchTarget=null;
 },{passive:true});
@@ -993,12 +1006,13 @@ canvas.addEventListener('touchmove',()=>touchClick=false,{passive:true});
 // En el área general (fuera del canvas) nunca marcar
 area.addEventListener('click',e=>{if(e.target===area||e.target===document.getElementById('drop-zone'))e.stopPropagation()});
 
-function crearMarcador(clientX,clientY,p){
+async function crearMarcador(clientX,clientY,p){
   const rect=area.getBoundingClientRect();
   const px=(clientX-rect.left-p.offsetX)/p.escala;
   const py=(clientY-rect.top-p.offsetY)/p.escala;
-  const id=`OBS-${String(p.idCounter).padStart(2,'0')}`;
-  p.idCounter++;
+  contadorGlobal++;
+  await setContadorGlobal(contadorGlobal);
+  const id=`OBS-${String(contadorGlobal).padStart(2,'0')}`;
   const obs={id,plano:p.nombre,pagina:p.pagActual,px:parseFloat(px.toFixed(1)),py:parseFloat(py.toFixed(1)),
     rubro:'Agua',desc:'',sev:sevActual,responsable:'',foto:null,
     estado:'pendiente',notaResolucion:'',fechaResolucion:null,
@@ -1110,9 +1124,14 @@ function guardarObservacion(){
     const verificar=await dbGet('planos',p.id);
     const obsGuardada=verificar&&verificar.obs?verificar.obs.find(o=>o.id===obs.id):null;
     const estadoVerif=obsGuardada?obsGuardada.estado:'no encontrada';
-    console.log('DB guardada — obs:',obs.id,'estado en DB:',estadoVerif,'estado en memoria:',obs.estado);
+    console.log('DB guardada — plano id:',p.id,'obs:',obs.id,'estado en DB:',estadoVerif,'estado en memoria:',obs.estado,'total obs en DB:',verificar?verificar.obs.length:0);
     renderMarcadores();renderLista();
-    toast(`${obs.id} guardada (${estadoVerif}) ✓`,'ok');
+    if(estadoVerif===obs.estado){
+      toast(`${obs.id} guardada ✓`,'ok');
+    } else {
+      toast(`Error: estado no coincide (${obs.estado} vs ${estadoVerif})','err');
+      console.error('MISMATCH — estado en memoria:',obs.estado,'estado en DB:',estadoVerif);
+    }
   }catch(e){
     console.error('Error al guardar en DB:',e);
     toast('Error al guardar localmente','err');
@@ -1411,6 +1430,7 @@ window.addEventListener('offline',actualizarConexion);
 // ── Init ───────────────────────────────────────────────────────
 async function init(){
   await initDB();
+  contadorGlobal=await getContadorGlobal();
   actualizarConexion();
   irHome();
   renderHomeUI();
