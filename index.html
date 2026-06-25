@@ -632,6 +632,22 @@ area.addEventListener('mousemove',e=>{
 area.addEventListener('mouseup',()=>dragging=false);
 area.addEventListener('mouseleave',()=>dragging=false);
 
+// Zoom con scroll del mouse centrado en el cursor
+area.addEventListener('wheel',e=>{
+  e.preventDefault();
+  const p=planoActual();if(!p)return;
+  const rect=area.getBoundingClientRect();
+  const cx=e.clientX-rect.left;
+  const cy=e.clientY-rect.top;
+  const planoCx=(cx-p.offsetX)/p.escala;
+  const planoCy=(cy-p.offsetY)/p.escala;
+  const factor=e.deltaY<0?1.1:0.9;
+  p.escala=Math.max(0.3,Math.min(5,p.escala*factor));
+  p.offsetX=cx-planoCx*p.escala;
+  p.offsetY=cy-planoCy*p.escala;
+  renderPagina(p.pagActual);actualizarZoomLabel();
+},{passive:false});
+
 area.addEventListener('touchstart',e=>{
   if(e.touches.length===1&&modo==='nav'){const p=planoActual();if(!p)return;lastTouch={x:e.touches[0].clientX-p.offsetX,y:e.touches[0].clientY-p.offsetY};}
   if(e.touches.length===2)pinchDist=dist(e.touches);
