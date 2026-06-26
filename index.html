@@ -870,7 +870,7 @@ function abrirFormulario(obs){
   document.querySelectorAll('.sev-btn').forEach(b=>{b.classList.remove('sel');if(b.classList.contains(obs.sev))b.classList.add('sel');});
   fotoDataUrl=obs.foto||null;
   document.getElementById('foto-uploading').style.display='none';
-  if(obs.foto&&obs.foto.startsWith('http')){
+  if(obs.foto&&obs.foto!=='No'){
     mostrarFotoExistente(obs.foto);
   } else {
     document.getElementById('foto-btn').style.display='block';
@@ -921,17 +921,8 @@ async function subirFotoDropbox(e){
       body:arrayBuffer
     });
     if(!uploadRes.ok)throw new Error('Error al subir');
-    // Obtener link compartido
-    const shareRes=await fetch('https://api.dropboxapi.com/2/sharing/create_shared_link_with_settings',{
-      method:'POST',
-      headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json'},
-      body:JSON.stringify({path:rutaDropbox,settings:{requested_visibility:'public'}})
-    });
-    const shareData=await shareRes.json();
-    // Dropbox devuelve ?dl=0, cambiamos a ?raw=1 para link directo
-    const link=(shareData.url||shareData.error_summary||'').replace('?dl=0','?raw=1');
-    if(!link||link.includes('error'))throw new Error('No se pudo obtener el link');
-    fotoDataUrl=link;
+    // Guardar la ruta de Dropbox como referencia
+    fotoDataUrl=rutaDropbox;
     mostrarFotoExistente(link);
     toast('Foto subida a Dropbox ✓','ok');
   }catch(err){
@@ -943,10 +934,23 @@ async function subirFotoDropbox(e){
   }
 }
 
-function mostrarFotoExistente(url){
+async function mostrarFotoExistente(ruta){
   document.getElementById('foto-btn').style.display='none';
   document.getElementById('foto-existente').style.display='block';
-  document.getElementById('foto-link').href=url;
+  const linkEl=document.getElementById('foto-link');
+  // Si es ruta de Dropbox, obtener link temporal para ver
+  if(ruta&&ruta.startsWith('/')){
+    try{
+      const token=await obtenerAccessToken();
+      const linkData=await obtenerLinkTemporal(token,ruta);
+      linkEl.href=linkData.link||'#';
+    }catch(e){
+      linkEl.href='#';
+      console.error('No se pudo obtener link temporal',e);
+    }
+  } else {
+    linkEl.href=ruta||'#';
+  }
 }
 
 function eliminarFoto(){
