@@ -132,6 +132,12 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--f
 .foto-area:hover{border-color:var(--accent)}
 .foto-area p{font-size:12px;color:var(--muted);margin-top:5px}
 .foto-preview{width:100%;border-radius:var(--rs);margin-top:6px;display:none}
+.foto-link{display:flex;align-items:center;gap:8px;padding:8px 10px;background:var(--surface2);border:0.5px solid var(--border2);border-radius:var(--rs);text-decoration:none;color:var(--accent);font-size:12px;margin-top:6px}
+.foto-link:hover{border-color:var(--accent)}
+.btn-foto-eliminar{background:none;border:none;color:var(--muted);cursor:pointer;font-size:11px;margin-left:auto;padding:2px 6px;border-radius:4px}
+.btn-foto-eliminar:hover{color:var(--danger)}
+.foto-uploading{font-size:12px;color:var(--muted);text-align:center;padding:8px;animation:pulse 1s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}
 .btn-guardar{width:100%;padding:10px;background:var(--accent);border:none;border-radius:var(--rs);color:#1a1509;font-size:13px;font-weight:600;cursor:pointer;transition:opacity 0.12s;font-family:var(--font)}
 .btn-guardar:hover{opacity:0.88}
 .btn-eliminar{width:100%;padding:8px;background:none;border:0.5px solid var(--border2);border-radius:var(--rs);color:var(--muted);font-size:12px;cursor:pointer;font-family:var(--font);transition:all 0.12s}
@@ -308,12 +314,22 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--f
           </div>
           <div class="field-group">
             <label>Foto (opcional)</label>
-            <div class="foto-area" onclick="document.getElementById('foto-input').click()">
-              <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" style="opacity:0.4"><path d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z"/><circle cx="12" cy="13" r="4"/></svg>
-              <p>Tocar para tomar foto o galería</p>
-              <img id="foto-preview" class="foto-preview" alt="">
+            <div id="foto-container">
+              <div class="foto-area" id="foto-btn" onclick="document.getElementById('foto-input').click()">
+                <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" style="opacity:0.4"><path d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z"/><circle cx="12" cy="13" r="4"/></svg>
+                <p>Tocar para tomar foto o galería</p>
+              </div>
+              <div id="foto-uploading" class="foto-uploading" style="display:none">Subiendo foto a Dropbox…</div>
+              <div id="foto-existente" style="display:none">
+                <a id="foto-link" class="foto-link" href="#" target="_blank">
+                  <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z"/><circle cx="12" cy="13" r="4"/></svg>
+                  Ver foto en Dropbox
+                  <svg width="12" height="12" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" style="margin-left:auto;opacity:0.5"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+                </a>
+                <button class="btn-foto-eliminar" onclick="eliminarFoto()">✕ Eliminar foto</button>
+              </div>
             </div>
-            <input type="file" id="foto-input" accept="image/*" capture="environment" onchange="previewFoto(event)" style="display:none">
+            <input type="file" id="foto-input" accept="image/*" capture="environment" onchange="subirFotoDropbox(event)" style="display:none">
           </div>
           <div class="field-group">
             <label>Responsable</label>
@@ -375,7 +391,7 @@ let db;
 let modo='nav';
 let sevActual='media';
 let obsActiva=null;
-let fotoDataUrl=null;
+let fotoDataUrl=null; // ahora guarda la URL de Dropbox, no el base64
 let pdfDocActual=null;
 let renderizando=false;
 let estadoActual='pendiente';
@@ -536,7 +552,9 @@ async function activarPlano(id,pdfDocArg){
   document.getElementById('form-hint').style.display='';
   document.getElementById('form-fields').style.display='none';
   document.getElementById('inp-desc').value='';
-  document.getElementById('foto-preview').style.display='none';
+  document.getElementById('foto-btn').style.display='block';
+  document.getElementById('foto-existente').style.display='none';
+  document.getElementById('foto-uploading').style.display='none';
   document.querySelectorAll('.sev-btn').forEach(b=>{b.classList.remove('sel');if(b.classList.contains('media'))b.classList.add('sel')});
   if(pdfDocArg){pdfDocActual=pdfDocArg;p.pdfDoc=pdfDocArg;}
   else if(p.pdfDoc){pdfDocActual=p.pdfDoc;}
@@ -566,6 +584,38 @@ async function reabrirPlano(id){
   }
 }
 
+async function cerrarConConfirmacion(id){
+  const p=planosAbiertos.find(pl=>pl.id===id);
+  if(!p)return;
+  const noSinc=p.obs.filter(o=>!o.sinc);
+  if(noSinc.length){
+    const respuesta=confirm(`Hay ${noSinc.length} observación${noSinc.length!==1?'es':''} sin certificar en "${p.nombre}".
+
+¿Querés certificar antes de cerrar?`);
+    if(respuesta){
+      // Certificar y luego cerrar
+      if(!navigator.onLine){toast('Sin conexión. No se puede certificar.','err');return;}
+      toast('Certificando…','');
+      try{
+        const ok=await enviarObservaciones(noSinc);
+        if(ok){
+          noSinc.forEach(o=>o.sinc=true);
+          await dbPut('planos',{id:p.id,nombre:p.nombre,obs:p.obs,idCounter:p.idCounter,totalPags:p.totalPags,dropboxPath:p.dropboxPath||null});
+          toast(`${noSinc.length} obs. certificadas ✓`,'ok');
+        } else {
+          toast('Error al certificar. Cerrar igual?','err');
+          const forzar=confirm('No se pudo certificar. ¿Cerrar el plano de todas formas?');
+          if(!forzar)return;
+        }
+      }catch(e){
+        const forzar=confirm('Error al certificar. ¿Cerrar el plano de todas formas?');
+        if(!forzar)return;
+      }
+    }
+  }
+  await cerrarPlano(id);
+}
+
 async function cerrarPlano(id,mostrarToast=true){
   const idx=planosAbiertos.findIndex(p=>p.id===id);
   if(idx===-1)return;
@@ -588,7 +638,7 @@ function renderTabs(){
   cont.innerHTML=planosAbiertos.map(p=>`
     <div class="ptab${p.id===planoActualId?' active':''}" onclick="activarPlano('${p.id}')">
       <span class="ptab-name">${p.nombre.replace('.pdf','')}</span>
-      <button class="ptab-close" onclick="event.stopPropagation();cerrarPlano('${p.id}')">✕</button>
+      <button class="ptab-close" onclick="event.stopPropagation();cerrarConConfirmacion('${p.id}')">✕</button>
     </div>`).join('');
 }
 
@@ -818,9 +868,14 @@ function abrirFormulario(obs){
   else{document.getElementById('inp-otro-resp').value='';document.getElementById('otro-resp-field').style.display='none';}
   sevActual=obs.sev;
   document.querySelectorAll('.sev-btn').forEach(b=>{b.classList.remove('sel');if(b.classList.contains(obs.sev))b.classList.add('sel');});
-  fotoDataUrl=obs.foto;
-  const prev=document.getElementById('foto-preview');
-  if(obs.foto){prev.src=obs.foto;prev.style.display='block';}else{prev.style.display='none';}
+  fotoDataUrl=obs.foto||null;
+  document.getElementById('foto-uploading').style.display='none';
+  if(obs.foto&&obs.foto.startsWith('http')){
+    mostrarFotoExistente(obs.foto);
+  } else {
+    document.getElementById('foto-btn').style.display='block';
+    document.getElementById('foto-existente').style.display='none';
+  }
   document.getElementById('estado-field').style.display='block';
   estadoActual=obs.estado||'pendiente';
   setEstado(estadoActual);
@@ -841,11 +896,63 @@ function setSev(btn,s){
   btn.classList.add('sel');
 }
 
-function previewFoto(e){
+async function subirFotoDropbox(e){
   const file=e.target.files[0];if(!file)return;
-  const reader=new FileReader();
-  reader.onload=ev=>{fotoDataUrl=ev.target.result;const prev=document.getElementById('foto-preview');prev.src=fotoDataUrl;prev.style.display='block';};
-  reader.readAsDataURL(file);
+  e.target.value='';
+  // Mostrar estado de carga
+  document.getElementById('foto-btn').style.display='none';
+  document.getElementById('foto-uploading').style.display='block';
+  document.getElementById('foto-existente').style.display='none';
+  try{
+    const token=await obtenerAccessToken();
+    // Nombre del archivo: OBS-XX_timestamp.jpg
+    const ext=file.name.split('.').pop()||'jpg';
+    const nombreArchivo=`${obsActiva}_${Date.now()}.${ext}`;
+    const rutaDropbox=`/Espacio familiar/COMPLEJO CATAMARAN/Catamaran 12/m_Obra/Certificaciones/Fotos/${nombreArchivo}`;
+    // Subir a Dropbox
+    const arrayBuffer=await file.arrayBuffer();
+    const uploadRes=await fetch('https://content.dropboxapi.com/2/files/upload',{
+      method:'POST',
+      headers:{
+        'Authorization':'Bearer '+token,
+        'Content-Type':'application/octet-stream',
+        'Dropbox-API-Arg':JSON.stringify({path:rutaDropbox,mode:'add',autorename:true})
+      },
+      body:arrayBuffer
+    });
+    if(!uploadRes.ok)throw new Error('Error al subir');
+    // Obtener link compartido
+    const shareRes=await fetch('https://api.dropboxapi.com/2/sharing/create_shared_link_with_settings',{
+      method:'POST',
+      headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json'},
+      body:JSON.stringify({path:rutaDropbox,settings:{requested_visibility:'public'}})
+    });
+    const shareData=await shareRes.json();
+    // Dropbox devuelve ?dl=0, cambiamos a ?raw=1 para link directo
+    const link=(shareData.url||shareData.error_summary||'').replace('?dl=0','?raw=1');
+    if(!link||link.includes('error'))throw new Error('No se pudo obtener el link');
+    fotoDataUrl=link;
+    mostrarFotoExistente(link);
+    toast('Foto subida a Dropbox ✓','ok');
+  }catch(err){
+    console.error(err);
+    toast('Error al subir la foto','err');
+    document.getElementById('foto-btn').style.display='block';
+  }finally{
+    document.getElementById('foto-uploading').style.display='none';
+  }
+}
+
+function mostrarFotoExistente(url){
+  document.getElementById('foto-btn').style.display='none';
+  document.getElementById('foto-existente').style.display='block';
+  document.getElementById('foto-link').href=url;
+}
+
+function eliminarFoto(){
+  fotoDataUrl=null;
+  document.getElementById('foto-btn').style.display='block';
+  document.getElementById('foto-existente').style.display='none';
 }
 
 // guardarObservacion es async para poder usar await con dbPut
@@ -874,7 +981,8 @@ async function guardarObservacion(){
   toast(`${obs.id} guardada ✓`,'ok');
   document.getElementById('inp-desc').value='';
   fotoDataUrl=null;
-  document.getElementById('foto-preview').style.display='none';
+  document.getElementById('foto-btn').style.display='block';
+  document.getElementById('foto-existente').style.display='none';
 }
 
 async function eliminarActual(){
@@ -1033,7 +1141,7 @@ async function enviarObservaciones(obs){
     obra:CONFIG.OBRA,
     observaciones:obs.map(o=>({
       id:o.id,plano:o.plano,pagina:o.pagina,rubro:o.rubro,desc:o.desc,sev:o.sev,
-      responsable:o.responsable,foto:o.foto?'Sí':'No',
+      responsable:o.responsable,foto:o.foto||'No',
       fecha:new Date(o.fecha).toLocaleString('es-AR'),
       estado:o.estado||'pendiente',
       notaResolucion:o.notaResolucion||'',
