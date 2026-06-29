@@ -52,19 +52,28 @@
     const BLOQUES = { 'T': 'Torre', 'B': 'Basamento' };
 
     function parsearNombrePlano(nombre) {
-      // Formato: [Disciplina]_[Nivel]_[Bloque]_[Edificio]_[Depto]
-      // Ejemplo: 11_02_T_12_B o 11_02_T_12 (sin depto)
-      const partes = nombre.split('_');
-      if (partes.length < 4) return null;
-      return {
-        disciplinaCod: partes[0]?.trim(),
-        nivelCod:      partes[1]?.trim(),
-        bloqueCod:     partes[2]?.trim().toUpperCase(),
-        depto:         partes[4]?.trim().toUpperCase() || '',
-        disciplina:    DISCIPLINAS[partes[0]?.trim()] || partes[0],
-        nivel:         NIVELES[partes[1]?.trim()]     || partes[1],
-        bloque:        BLOQUES[partes[2]?.trim().toUpperCase()] || partes[2],
-      };
+      // Intentar formato con guiones bajos: DD_NN_B_12_X (oficial)
+      // Ejemplo: 08_02_T_12_B o 08_02_T_12 (sin depto)
+      const partesGuionBajo = nombre.split('_');
+      if (partesGuionBajo.length >= 4) {
+        const d = partesGuionBajo[0]?.trim();
+        const n = partesGuionBajo[1]?.trim();
+        const b = partesGuionBajo[2]?.trim().toUpperCase();
+        // Validar que los primeros campos tienen sentido
+        if (DISCIPLINAS[d] && (NIVELES[n] || /^\d+$/.test(n)) && BLOQUES[b]) {
+          return {
+            disciplinaCod: d,
+            nivelCod:      n,
+            bloqueCod:     b,
+            depto:         partesGuionBajo[4]?.trim().toUpperCase() || '',
+            disciplina:    DISCIPLINAS[d],
+            nivel:         NIVELES[n] || `Piso ${parseInt(n)}`,
+            bloque:        BLOQUES[b],
+          };
+        }
+      }
+      // Formato desconocido — no parsear, devolver null
+      return null;
     }
 
     const RUBROS = ['Agua','Aire Acondicionado','Carpintería aluminio','Cerámico','Cloaca y pluvial','Durlock','Electricidad','Estructura','Gas','Incendio','Mampostería','Marcos y premarcos','Marmoles','Metalúrgica','Muebles','Pintura','Replanteo','Revoque y Contrapiso','Terminaciones','Yeso','Zócalos'];
@@ -175,10 +184,40 @@
     }
 
     // ─── PANTALLA PLANOS ──────────────────────────────────────────────────────
+    // Migrar planos existentes que no tienen metadata parseada
+    async function migrarMetadataPlanos() {
+      const snap = await getDocs(collection(db, 'planos'));
+      const batch = [];
+      snap.forEach(d => {
+        const p = d.data();
+        if (!p.disciplina && p.nombre) {
+          const meta = parsearNombrePlano(p.nombre);
+          if (meta) {
+            batch.push(updateDoc(doc(db, 'planos', d.id), {
+              disciplina:    meta.disciplina    || '',
+              disciplinaCod: meta.disciplinaCod || '',
+              nivel:         meta.nivel         || '',
+              nivelCod:      meta.nivelCod      || '',
+              bloque:        meta.bloque        || '',
+              bloqueCod:     meta.bloqueCod     || '',
+              depto:         meta.depto         || '',
+            }));
+          }
+        }
+      });
+      if (batch.length > 0) {
+        await Promise.all(batch);
+        console.log(`✓ Metadata actualizada en ${batch.length} planos`);
+      }
+    }
+
     async function iniciarPantallaPlanos() {
       document.getElementById('user-nombre').textContent = currentUserData.nombre || currentUser.email;
       document.getElementById('user-email').textContent = currentUser.email;
       if (currentUser.photoURL) document.getElementById('user-avatar').src = currentUser.photoURL;
+
+      // Migrar planos existentes sin metadata (corre silenciosamente)
+      migrarMetadataPlanos().catch(e => console.warn('Migración metadata:', e));
 
       // Listeners de filtros
       document.getElementById('filtro-busqueda').addEventListener('input', aplicarFiltros);
