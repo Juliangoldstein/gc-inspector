@@ -191,7 +191,8 @@
       snap.forEach(d => {
         const p = d.data();
         if (!p.disciplina && p.nombre) {
-          const meta = parsearNombrePlano(p.nombre);
+          // Intentar con nombreOriginal primero, si no con nombre
+          const meta = parsearNombrePlano(p.nombreOriginal || p.nombre.replace(/ /g, '_'));
           if (meta) {
             batch.push(updateDoc(doc(db, 'planos', d.id), {
               disciplina:    meta.disciplina    || '',
@@ -219,22 +220,22 @@
       // Migrar planos existentes sin metadata (corre silenciosamente)
       migrarMetadataPlanos().catch(e => console.warn('Migración metadata:', e));
 
-      // Listeners de filtros
-      document.getElementById('filtro-busqueda').addEventListener('input', aplicarFiltros);
-      document.getElementById('filtro-disciplina').addEventListener('change', aplicarFiltros);
-      document.getElementById('filtro-nivel').addEventListener('change', aplicarFiltros);
-      document.getElementById('filtro-bloque').addEventListener('change', aplicarFiltros);
-      document.getElementById('filtro-depto').addEventListener('change', aplicarFiltros);
-      document.getElementById('btn-limpiar-filtros').addEventListener('click', () => {
-        document.getElementById('filtro-busqueda').value = '';
-        ['filtro-disciplina','filtro-nivel','filtro-bloque','filtro-depto'].forEach(id => {
-          document.getElementById(id).value = '';
-        });
-        aplicarFiltros();
-      });
-
       cargarListaPlanos();
     }
+
+    // Listeners de filtros — adjuntados una sola vez al cargar la página
+    document.getElementById('filtro-busqueda').addEventListener('input', aplicarFiltros);
+    document.getElementById('filtro-disciplina').addEventListener('change', aplicarFiltros);
+    document.getElementById('filtro-nivel').addEventListener('change', aplicarFiltros);
+    document.getElementById('filtro-bloque').addEventListener('change', aplicarFiltros);
+    document.getElementById('filtro-depto').addEventListener('change', aplicarFiltros);
+    document.getElementById('btn-limpiar-filtros').addEventListener('click', () => {
+      document.getElementById('filtro-busqueda').value = '';
+      ['filtro-disciplina','filtro-nivel','filtro-bloque','filtro-depto'].forEach(id => {
+        document.getElementById(id).value = '';
+      });
+      aplicarFiltros();
+    });
     let todosLosPlanos = []; // cache local para filtrado sin re-query
 
     async function cargarListaPlanos() {
@@ -368,10 +369,12 @@
     }
     document.getElementById('btn-cerrar-modal-plano').addEventListener('click', () => document.getElementById('modal-agregar-plano').classList.add('oculto'));
     async function seleccionarDropbox(archivo) {
-      const nombreBase = archivo.name.replace('.pdf', '');
-      const meta       = parsearNombrePlano(nombreBase) || {};
+      const nombreOriginal = archivo.name.replace('.pdf', '');          // con guiones bajos
+      const nombreDisplay  = nombreOriginal.replace(/_/g, ' ');         // para mostrar en UI
+      const meta           = parsearNombrePlano(nombreOriginal) || {};
       const docRef = await addDoc(collection(db,'planos'), {
-        nombre:        nombreBase,
+        nombre:        nombreDisplay,   // legible para mostrar
+        nombreOriginal: nombreOriginal, // para parsear y filtrar
         dropboxPath:   archivo.path_lower,
         paginas:       1,
         disciplina:    meta.disciplina    || '',
@@ -384,7 +387,7 @@
         creadoPor:     currentUser.uid,
         creadoEn:      serverTimestamp(),
       });
-      const plano = { id: docRef.id, nombre: nombreBase, dropboxPath: archivo.path_lower, paginas: 1, ...meta };
+      const plano = { id: docRef.id, nombre: nombreDisplay, nombreOriginal, dropboxPath: archivo.path_lower, paginas: 1, ...meta };
       abrirPlano(plano);
     }
 
