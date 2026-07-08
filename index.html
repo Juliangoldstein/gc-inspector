@@ -6,8 +6,36 @@
   <title>GC Inspector — Catamarán 12</title>
   <meta name="theme-color" content="#1a1a2e">
   <link rel="manifest" href="manifest.json">
+  <link rel="icon" type="image/png" href="favicon-final-32.png">
   <link rel="apple-touch-icon" href="icon-192.png">
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <!-- CSP: limita qué dominios pueden cargar scripts/conectarse, lo cual mitiga el
+       riesgo del punto 5 (CDN comprometido cargando código ajeno) y acota a qué
+       endpoints puede hablar la app. ⚠️ Nota honesta: como este archivo es un único
+       HTML con toda la lógica en un <script> inline (no hay build con nonces/hashes),
+       script-src necesita 'unsafe-inline' para que la app funcione — eso significa que
+       la CSP NO bloquea por sí sola el patrón onerror="..."/onclick="..." inyectado vía
+       innerHTML. La protección real contra eso la dan los escapeHtml() agregados abajo;
+       la CSP es una capa extra, no el único mecanismo. Para CSP "fuerte" de verdad haría
+       falta separar el script a un archivo .js externo y usar nonce o hash — lo dejamos
+       como mejora futura, fuera del alcance de este parche. -->
+  <meta http-equiv="Content-Security-Policy" content="
+    default-src 'self';
+    script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com https://www.gstatic.com https://apis.google.com;
+    style-src 'self' 'unsafe-inline';
+    img-src 'self' data: blob: https://*.googleusercontent.com https://firebasestorage.googleapis.com;
+    connect-src 'self' https://*.googleapis.com https://*.firebaseio.com https://api.dropboxapi.com https://content.dropboxapi.com https://*.dropboxusercontent.com https://*.firebasestorage.app https://apis.google.com https://gc-inspector-catamaran12.firebaseapp.com https://us-central1-gc-inspector-catamaran12.cloudfunctions.net;
+    frame-src 'self' blob: https://apis.google.com https://gc-inspector-catamaran12.firebaseapp.com https://accounts.google.com;
+    worker-src 'self' blob: https://cdnjs.cloudflare.com;
+    object-src 'none';
+    base-uri 'self';
+  ">
+  <!-- pdf.js ya NO se carga con <script src> — se importa como módulo ES
+       dentro del <script type="module"> principal (ver más abajo), porque
+       a partir de la v4 la librería pasó a ser ESM-only. Actualizado de
+       3.11.174 a 5.4.149: la 3.11.174 tenía CVE-2024-4367 (ejecución de JS
+       arbitrario al abrir un PDF malicioso), corregido desde la 4.2.67. -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <script type="module">
     import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
     import { getAuth, signInWithPopup, signOut, GoogleAuthProvider, onAuthStateChanged }
@@ -17,6 +45,7 @@
       from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js';
     import { getStorage, ref, uploadBytes, getDownloadURL, deleteObject }
       from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-storage.js';
+    import * as pdfjsLib from 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/5.4.149/pdf.min.mjs';
 
     const firebaseConfig = {
       apiKey: "AIzaSyDYmNpwzqhgp-caudqx4VJtcwd4f4zsQ7w",
@@ -26,12 +55,33 @@
       messagingSenderId: "697303338319",
       appId: "1:697303338319:web:1a6c4b153c3657cbb0c93a"
     };
-    const DROPBOX_APP_KEY       = 'qw79ab7qqu953as';
-    const DROPBOX_APP_SECRET    = '4iz9dk1tff48jxq';
-    const DROPBOX_REFRESH_TOKEN = 'h9uoKnqZO-UAAAAAAAAAATVIwKRENA91kwiaZ7bkejgAvIfWUATIMYPVZLVmckgX';
+    // El App Secret y el Refresh Token de Dropbox YA NO viven acá — se movieron
+    // a Firebase Secret Manager, accesibles solo desde la Cloud Function
+    // "obtenerTokenDropbox". El navegador solo conoce esta URL, que le
+    // devuelve un access token de corta duración (~4hs) por vez.
+    const CLOUD_FUNCTION_DROPBOX_TOKEN = 'https://us-central1-gc-inspector-catamaran12.cloudfunctions.net/obtenerTokenDropbox';
     const DROPBOX_FOLDER        = '/Espacio familiar/COMPLEJO CATAMARAN/Catamaran 12/m_Obra';
-    const APPS_SCRIPT_URL       = 'https://script.google.com/macros/s/AKfycbxBMLwyI4TL8pERW9KyWaVca5lz5EK0fBDGscGyefxUPhZA_4H_tGaQ7lGTShLILnGYIg/exec';
+    // El Apps Script ya NO se llama directo desde el navegador — pasa por esta
+    // Cloud Function, que exige la sesión real del usuario logueado y chequea
+    // en Firestore que esté autorizado antes de reenviar el pedido al Sheet.
+    const PROXY_APPS_SCRIPT_URL = 'https://us-central1-gc-inspector-catamaran12.cloudfunctions.net/proxyAppsScript';
+
+    async function llamarAppsScript(payload) {
+      const idToken = await currentUser.getIdToken();
+      return fetch(PROXY_APPS_SCRIPT_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${idToken}`,
+        },
+        body: JSON.stringify(payload),
+      });
+    }
     const OBRA_NOMBRE           = 'Catamarán 12';
+
+    // Íconos reutilizables para restaurar el contenido de los botones tras un estado de carga
+    const ICONO_CERTIFICAR = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg><span>Certificar</span>';
+    const ICONO_INFORME    = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg><span>Ver informe</span>';
 
     // ─── NOMENCLATURA DE PLANOS ──────────────────────────────────────────────
     const DISCIPLINAS = {
@@ -51,6 +101,142 @@
 
     const BLOQUES = { 'T': 'Torre', 'B': 'Basamento' };
 
+    // ─── UNIDADES POR BLOQUE Y NIVEL ─────────────────────────────────────────
+    // Estructura del edificio: qué unidades (deptos/locales/amenities) existen
+    // en cada piso de cada bloque. Claves = códigos de la nomenclatura.
+    // Fuente temporal: cuando exista la app de Calidad, esto migra a
+    // config/estructura en Firestore como fuente única para ambas apps.
+    const UNIDADES = {
+      'T': {
+        '00': ['A','L1','L2','L3'],
+        '01': ['A','B','C','D'],
+        '02': ['A','B','C','D'],
+        '03': ['SUM','GYM'],
+        '04': ['A','B','C'],
+        '05': ['A','B','C'],
+        '06': ['A','B'],
+        '07': ['A','B'],
+        '08': ['A','B'],
+        '99': ['Bauleras'],
+      },
+      'B': {
+        '00': ['B','L4','L5','L6','L7'],
+        '01': ['E','F','G','H','I','J'],
+        '02': ['E','F','G','H','I','J'],
+        '03': ['Terraza'],
+      },
+    };
+
+    // L1, L2... se muestran como "Local 1", "Local 2"... (el valor guardado sigue siendo L1)
+    function etiquetaUnidad(u) {
+      return /^L\d+$/.test(u) ? 'Local ' + u.slice(1) : u;
+    }
+
+    // ─── CROQUIS DE CALIDAD ───────────────────────────────────────────────────
+    // Cada croquis es un SVG con una forma por unidad (data-unidad="X") y las
+    // etiquetas como trazados (tipografía Ailerons vectorizada). La app pinta
+    // cada .unidad según el estado calculado y detecta el toque por data-unidad.
+    // Faltan los 7 croquis restantes (Torre completa + Terraza) — los niveles sin
+    // croquis muestran un aviso en la pantalla de Calidad.
+    const CROQUIS_SVG = {
+      'basamento_pb': `<svg viewBox="1800 3300 25600 14100" xmlns="http://www.w3.org/2000/svg">
+  <!-- GC Calidad — Croquis Basamento Planta Baja
+       Unidades: B (unificada), L4, L5, L6, L7. Espacio común no interactivo.
+       Etiquetas en tipografía Ailerons convertida a trazados (la fuente SVG
+       embebida original no la soportan los navegadores modernos). -->
+  <style>
+    .unidad { fill: #d9dce3; stroke: #2e3347; stroke-width: 60; cursor: pointer; }
+    .unidad-etiqueta path { fill: #1a1d27; pointer-events: none; }
+    .espacio-comun { fill: #eceef2; stroke: #2e3347; stroke-width: 40; stroke-dasharray: 260 160; pointer-events: none; }
+  </style>
+  <g id="espacios-comunes">
+    <polygon class="espacio-comun" points="12136.5,15599.71 12152.19,15599.71 12152.19,11789.85 15328.87,11789.85 15328.87,10485.99 19382.52,10485.99 19382.52,9190.83 16860.05,9190.83 16860.05,8007.77 12354.64,8007.77 12363.32,9209.28 10069.95,9209.28 10072.3,10776.82 7443.65,10776.82 7443.65,15571.41 12136.5,15571.41"/>
+  </g>
+  <g id="unidades">
+    <path class="unidad" data-unidad="B" d="M21717.77 7236.99 l2599.15 0 2416.97 0 0 5055.4 c304.74,1442.79 358.52,2616.7 0,4382.15 -3490.15,609.47 -4954.68,340.59 -7351.37,0 l0 -72.25 c-2229.17,-501.51 -4369.79,-592.66 -7230.33,0 l0 -4812.44 3176.68 0 0 -1303.86 4053.65 0 0 -1295.16 2335.25 0 0 -1953.84 z"/>
+    <polygon class="unidad" data-unidad="L4" points="2427.51,7135.3 2427.51,12392.59 7443.65,12392.59 7443.65,3951.98 4863.23,3951.98 4863.23,7135.3"/>
+    <polygon class="unidad" data-unidad="L5" points="7443.65,4796.04 9686.44,4796.04 9682.32,3927.86 12324.16,3945.46 12363.32,9209.28 10069.95,9209.28 10072.3,10776.82 7443.65,10776.82"/>
+    <polygon class="unidad" data-unidad="L6" points="12354.64,8007.77 12330.52,4799.39 16842.12,4799.39 16842.12,3974.6 19512.97,3974.6 19512.97,9190.83 16860.05,9190.83 16860.05,8007.77"/>
+    <polygon class="unidad" data-unidad="L7" points="19512.97,9190.83 19512.97,4835.01 21699.85,4835.01 21699.85,3938.75 24316.92,3938.75 24316.92,7236.99 21717.77,7236.99 21717.77,9190.83"/>
+  </g>
+  <g id="etiquetas">
+    <g class="unidad-etiqueta" data-unidad="B">
+      <path transform="translate(19509.0,13931.7) scale(3.1750,-3.1750)" d="M368 350c42,13.0016 41.0016,57.0016 41.0016,57.0016l0 204.998c-1.00157,49.0016 -40,88 -89.0016,88l-130 0 0 -700 130 0c49.0016,0 88,39.0016 89.0016,88l0 205.002c0,0 0.998425,44 -41.0016,56.9984zm-30.9984 74c0,-32 -18,-40.9984 -37.0016,-40.9984l-38.9984 0 0 244.998 38.9984 0c19.0016,0 37.0016,-10 37.0016,-36l0 -168zm0 -316c0,-26.9984 -18,-36.9984 -37.0016,-36.9984l-38.9984 0 0 246 38.9984 0c19.0016,0 37.0016,-9.00157 37.0016,-40l0 -169.002z"/>
+    </g>
+    <g class="unidad-etiqueta" data-unidad="L4">
+      <path transform="translate(3807.5,9626.3) scale(2.4694,-2.4694)" d="M282.999 70.9999l0 607c0,11.9987 -9.99822,21.0007 -22.0009,22.0009l-49.9992 0 0 -700.001 172.003 0c22.9971,0 33.9996,9.99822 38.9967,19.0003 3.00068,6.00136 15.0034,33.9996 23.0012,51.9996l-162 0z"/>
+      <path transform="translate(5163.3,9626.3) scale(2.4694,-2.4694)" d="M361.001 204.002l0 495.999 -51.9996 0c-5.00113,0 -19.0003,-1.00023 -25.0016,-22.0009l-136.999 -476.999 26.998 -51.9996c5.00113,-10.0023 13.9991,-21.0007 38.0005,-21.0007l77.0013 0 0 -107c1.00023,-11.0025 9.99822,-21.0007 22.0009,-21.0007l49.9992 0 0 128.001 8.99799 0c24.0014,0 36.0001,10.9984 41.0012,21.0007 3.00068,5.99731 15.9996,36.0001 24.0014,55.0003l-74.0006 0zm-72.0001 235.997l0 -235.997 -67.9992 0 67.9992 235.997z"/>
+    </g>
+    <g class="unidad-etiqueta" data-unidad="L5">
+      <path transform="translate(8400.5,8094.3) scale(2.4694,-2.4694)" d="M282.999 70.9999l0 607c0,11.9987 -9.99822,21.0007 -22.0009,22.0009l-49.9992 0 0 -700.001 172.003 0c22.9971,0 33.9996,9.99822 38.9967,19.0003 3.00068,6.00136 15.0034,33.9996 23.0012,51.9996l-162 0z"/>
+      <path transform="translate(9756.3,8094.3) scale(2.4694,-2.4694)" d="M264.999 447l0 169.002c0,6.99754 5.00113,11.9987 11.9987,11.9987l80.0019 0c23.0012,0 33.9996,10.9984 39.0007,20.0005 3.00068,5.99731 14.9994,33.9996 23.0012,51.9996l-188.002 0c0,0 -38.0005,2.00045 -38.0005,-48.0028l0 -239.998c1.00023,-20.0005 16.9998,-36.0001 37.0003,-37.0003l73.0004 0c22.0009,0 39.0007,-16.9998 39.0007,-38.0005l0 -242.998c0,-21.0007 -16.9998,-38.0005 -39.0007,-38.0005 -21.0007,0 -38.0005,16.9998 -38.0005,38.0005l0 143c-18,-8.00181 -45.9983,-21.0007 -51.9996,-23.0012 -8.99799,-5.00113 -20.0005,-15.9996 -20.0005,-39.0007l0 -94.0011c1.00023,-47.9987 40.001,-87.9997 88.9999,-87.9997l45.0021 0c47.9987,2.00045 86.9995,40.001 86.9995,87.9997l0 278.002c-1.00023,48.999 -40.001,87.9997 -88.9999,87.9997l-60.0015 0z"/>
+    </g>
+    <g class="unidad-etiqueta" data-unidad="L6">
+      <path transform="translate(14935.5,7353.3) scale(2.4694,-2.4694)" d="M282.999 70.9999l0 607c0,11.9987 -9.99822,21.0007 -22.0009,22.0009l-49.9992 0 0 -700.001 172.003 0c22.9971,0 33.9996,9.99822 38.9967,19.0003 3.00068,6.00136 15.0034,33.9996 23.0012,51.9996l-162 0z"/>
+      <path transform="translate(16291.3,7353.3) scale(2.4694,-2.4694)" d="M260.998 448l0 156.999c0,21.0007 18,38.0005 39.0007,38.0005 21.0007,0 38.0005,-16.9998 38.0005,-38.0005l0 -79.9979 0 -1.00023c18,7.99776 46.9985,20.9967 51.9996,23.9973 10.0023,5.00113 20.0005,20.0005 20.0005,43.0017l0 25.9978c0,49.003 -39.0007,88.0038 -86.9995,88.9999l0 1.00023 -44.0019 0c-48.999,0 -88.9999,-39.9969 -88.9999,-90.0002l0 -535c0,-48.999 40.001,-88.9999 88.9999,-88.9999l45.0021 0c47.9987,1.00023 85.9993,40.001 85.9993,88.9999l0 267c0,49.003 -27.9983,99.0022 -97.0017,99.0022l-51.9996 0zm77.0013 -353.999c0,-20.0005 -18,-39.0007 -38.0005,-39.0007 -21.0007,0 -39.0007,18 -39.0007,39.0007l0 284 39.0007 0c20.0005,0 38.0005,-14.9994 38.0005,-33.9996l0 -250z"/>
+    </g>
+    <g class="unidad-etiqueta" data-unidad="L7">
+      <path transform="translate(20350.3,7203.3) scale(2.4694,-2.4694)" d="M282.999 70.9999l0 607c0,11.9987 -9.99822,21.0007 -22.0009,22.0009l-49.9992 0 0 -700.001 172.003 0c22.9971,0 33.9996,9.99822 38.9967,19.0003 3.00068,6.00136 15.0034,33.9996 23.0012,51.9996l-162 0z"/>
+      <path transform="translate(21706.0,7203.3) scale(2.4694,-2.4694)" d="M161 700.001l24.0014 -51.9996c4.99708,-9.00204 14.9994,-20.0005 38.9967,-20.0005l97.0017 0c-37.0003,-101.003 -95.0013,-306.001 -97.9979,-606 0,-12.0027 9.99822,-22.0009 21.9969,-22.0009l49.9992 0c0,454.002 128.001,700.001 128.001,700.001l-261.999 0z"/>
+    </g>
+  </g>
+</svg>`,
+      'basamento_1-2': `<svg viewBox="900 2000 28400 16400" xmlns="http://www.w3.org/2000/svg">
+  <!-- GC Calidad — Croquis Basamento 1° y 2° piso
+       Unidades: E, F, G, H, I, J. Espacio común central no interactivo.
+       Etiquetas en Ailerons (glifos originales convertidos a trazados). -->
+  <style>
+    .unidad { fill: #d9dce3; stroke: #2e3347; stroke-width: 60; cursor: pointer; }
+    .unidad-etiqueta path { fill: #1a1d27; pointer-events: none; }
+    .espacio-comun { fill: #eceef2; stroke: #2e3347; stroke-width: 40; stroke-dasharray: 260 160; pointer-events: none; }
+  </style>
+  <g id="espacios-comunes">
+    <polygon class="espacio-comun" points="12622.18,8153.49 17531.32,8153.49 17531.32,9540.85 23102.75,9540.85 23102.75,10821.49 15887.82,10821.49 15887.82,12379.6 14265.68,12379.6 14265.68,10821.49 7050.75,10821.49 7050.75,9540.85 12622.18,9540.85"/>
+  </g>
+  <g id="unidades">
+    <polygon class="unidad" data-unidad="E" points="23102.75,5459.68 25925.08,5459.68 25925.08,3713.93 23208.83,3713.93 23208.83,2646.73 20434.11,2646.73 20434.11,3671.24 17595.35,3671.24 17595.35,4396.94 15076.75,4396.94 15076.75,8153.49 17531.32,8153.49 17531.32,9540.85 23102.75,9540.85"/>
+    <polygon class="unidad" data-unidad="F" points="25830.22,13038 28628.83,13041.72 28628.83,7214.74 25925.08,7214.74 25925.08,5459.68 23102.75,5459.68 23102.75,14614.48 25830.22,14614.48"/>
+    <polygon class="unidad" data-unidad="G" points="23102.75,14614.48 25830.22,14614.48 25830.22,16712.44 23187.49,16712.44 23187.49,17779.64 20370.07,17779.64 20370.07,16755.13 17595.35,16755.13 17595.35,16029.43 15076.75,16029.43 15076.75,12379.6 15887.82,12379.6 15887.82,10821.49 23102.75,10821.49"/>
+    <polygon class="unidad" data-unidad="H" points="7050.75,14614.48 4323.28,14614.48 4323.28,16712.44 6966.01,16712.44 6966.01,17779.64 9783.43,17779.64 9783.43,16755.13 12558.15,16755.13 12558.15,16029.43 15076.75,16029.43 15076.75,12379.6 14265.68,12379.6 14265.68,10821.49 7050.75,10821.49"/>
+    <polygon class="unidad" data-unidad="I" points="4323.28,13038 1524.67,13041.72 1524.67,7214.74 4228.42,7214.74 4228.42,5459.68 7050.75,5459.68 7050.75,14614.48 4323.28,14614.48"/>
+    <polygon class="unidad" data-unidad="J" points="7050.75,5459.68 4228.42,5459.68 4228.42,3713.93 6944.67,3713.93 6944.67,2646.73 9719.39,2646.73 9719.39,3671.24 12558.15,3671.24 12558.15,4396.94 15076.75,4396.94 15076.75,8153.49 12622.18,8153.49 12622.18,9540.85 7050.75,9540.85"/>
+  </g>
+  <g id="etiquetas">
+    <g class="unidad-etiqueta" data-unidad="E">
+      <path transform="translate(19124.5,7260.3) scale(3.1750,-3.1750)" d="M291.002 71.0016l0 242.998c0,9.00157 8,17.0016 16.9984,17.0016l30 0c23.0016,0 33.0016,10 38,18.9984 3.00157,6 15.0016,35.0016 23.0016,53.0016l-108 0 0 208c0,10 6.99843,16.9984 16.9984,16.9984l58 0c23.0016,0 34,11.0016 38,20l24 52 -186.998 0c-12,0 -21.0016,-8.99843 -22,-20l0 -680 160 0c22.9984,0 34,10 38.9984,19.0016 3.00157,6 15.0016,34 23.0016,52l-150 0z"/>
+    </g>
+    <g class="unidad-etiqueta" data-unidad="F">
+      <path transform="translate(24606.5,11169.3) scale(3.1750,-3.1750)" d="M237.002 700c-12,0 -21.0016,-10 -21.0016,-20.9984l0 -679.002 50 0c11.0016,0 21.0016,9.00157 21.0016,21.0016l0 282.998c0,10 8,17.0016 18,17.0016l48 0c22.9984,0 32.9984,10.9984 38,20l24 52 -128 0 0 218c0,8.99843 8,16.9984 16.9984,16.9984l80 0c23.0016,0 33.0016,11.0016 38,20 3.00157,6 16,34 23.0016,52l-208 0z"/>
+    </g>
+    <g class="unidad-etiqueta" data-unidad="G">
+      <path transform="translate(19042.5,15253.3) scale(3.1750,-3.1750)" d="M410 618c0,48 -38.9984,87.0016 -86.9984,89.0016l-44 0c-49.0016,0 -89.0016,-40 -89.0016,-89.0016l0 -536c0,-48.9984 40,-89.0016 89.0016,-89.0016l44 0c48,2 86.9984,41.0016 86.9984,89.0016l0 255.002c0,26.9984 -12.9984,38.9984 -34.9984,38.9984l-90 0 24 -50c0,0 10,-22.9984 26,-22.9984l2.99843 0 0 -209.002c0,-20.9984 -16.9984,-38 -38,-38 -20.9984,0 -38,17.0016 -38,38l0 512c0,21.0016 17.0016,38 38,38 21.0016,0 38,-16.9984 38,-38l0 -160c19.0016,8 47.0016,21.0016 52,24 10,5.00157 20,15.0016 20,39.0016l0 108.998z"/>
+    </g>
+    <g class="unidad-etiqueta" data-unidad="H">
+      <path transform="translate(9205.5,15253.3) scale(3.1750,-3.1750)" d="M348 700l0 -308 -70 0c-16.9984,0 -24.9984,5.00157 -24.9984,25.0016l0 282.998 -43.0016 0c-22,0 -28.9984,-16 -28.9984,-28l0 -672 72 0 0 321.002 78 0c8.99843,0 16,-7.00157 16.9984,-16l0 -305.002 72 0 0 672c0,12 -6.99843,28 -28.9984,28l-43.0016 0z"/>
+    </g>
+    <g class="unidad-etiqueta" data-unidad="I">
+      <path transform="translate(3800.3,11169.3) scale(3.1750,-3.1750)" d="M214 700l0 -684.998c1.00157,-5.00157 4,-15.0016 21.0016,-15.0016l50.9984 0 0 672c0,12 -8,28 -28.9984,28l-43.0016 0z"/>
+    </g>
+    <g class="unidad-etiqueta" data-unidad="J">
+      <path transform="translate(9202.9,7260.3) scale(3.1750,-3.1750)" d="M287.002 700l0 -606c0,-20.9984 -17.0016,-38 -38,-38 -21.0016,0 -38,17.0016 -38,38l0 63.0016c-18,-8 -45.0016,-20 -50,-23.0016 -10,-4 -20,-14.9984 -20,-38l0 -14c0,-48.9984 38,-89.0016 86.9984,-89.0016l45.0016 0 0 1.00157c48,0.998425 86,40 86,88l0 590c0,12 -7.00157,28 -29.0016,28l-42.9984 0z"/>
+    </g>
+  </g>
+</svg>`,
+    };
+
+    // Mapeo bloque→nivel→id de croquis. Varios niveles comparten planta.
+    const CROQUIS_POR_NIVEL = {
+      'B': {
+        '00': 'basamento_pb',
+        '01': 'basamento_1-2',
+        '02': 'basamento_1-2',
+        // '03' (Terraza) — croquis pendiente
+      },
+      'T': {
+        // Torre — croquis pendientes
+      },
+    };
+
     function parsearNombrePlano(nombre) {
       // Intentar formato con guiones bajos: DD_NN_B_12_X (oficial)
       // Ejemplo: 08_02_T_12_B o 08_02_T_12 (sin depto)
@@ -61,11 +247,19 @@
         const b = partesGuionBajo[2]?.trim().toUpperCase();
         // Validar que los primeros campos tienen sentido
         if (DISCIPLINAS[d] && (NIVELES[n] || /^\d+$/.test(n)) && BLOQUES[b]) {
+          // El 5° lugar solo cuenta como depto si es una unidad REAL de ese
+          // bloque/nivel según UNIDADES. Si no lo es (ej: "PLANTA GENERAL",
+          // "CORTES"), el plano se trata como planta completa → campo Depto
+          // seleccionable. Se devuelve el valor canónico de UNIDADES
+          // (ej: "Bauleras", no "BAULERAS").
+          const deptoCrudo = partesGuionBajo[4]?.trim().toUpperCase() || '';
+          const unidadesDelPiso = UNIDADES[b]?.[n] || [];
+          const unidadValida = unidadesDelPiso.find(u => u.toUpperCase() === deptoCrudo);
           return {
             disciplinaCod: d,
             nivelCod:      n,
             bloqueCod:     b,
-            depto:         partesGuionBajo[4]?.trim().toUpperCase() || '',
+            depto:         unidadValida || '',
             disciplina:    DISCIPLINAS[d],
             nivel:         NIVELES[n] || `Piso ${parseInt(n)}`,
             bloque:        BLOQUES[b],
@@ -76,7 +270,40 @@
       return null;
     }
 
-    const RUBROS = ['Agua','Aire Acondicionado','Carpintería aluminio','Cerámico','Cloaca y pluvial','Durlock','Electricidad','Estructura','Gas','Incendio','Mampostería','Marcos y premarcos','Marmoles','Metalúrgica','Muebles','Pintura','Replanteo','Revoque y Contrapiso','Terminaciones','Yeso','Zócalos'];
+    // Lista maestra de rubros — fuente única para el desplegable de observaciones
+    // Y para los certificables de Calidad. Alfabética. Los 20 certificables + 4
+    // que solo sirven como observación (Estructura, Metalúrgica, Replanteo,
+    // Terminaciones — no se emiten certificados sobre ellos).
+    const RUBROS = ['Agua','Aire Acondicionado','Aluminio','Cerámico','Cloaca y pluvial','Contrapiso','Durlock','Electricidad','Estructura','Gas','Incendio','Mampostería','Marcos','Mármoles','Metalúrgica','Muebles','Pintura','Placares','Premarcos','Replanteo','Revoques interior','Terminaciones','Yeso','Zócalos'];
+
+    // Subconjunto certificable (los que aparecen en el selector de Calidad).
+    const RUBROS_CERTIFICABLES = ['Agua','Aire Acondicionado','Aluminio','Cerámico','Cloaca y pluvial','Contrapiso','Durlock','Electricidad','Gas','Incendio','Mampostería','Marcos','Mármoles','Muebles','Pintura','Placares','Premarcos','Revoques interior','Yeso','Zócalos'];
+
+    // Empresas/subcontratistas iniciales por rubro. Se usan solo para SEMBRAR
+    // config/empresas en Firestore la primera vez (si el doc no existe). Después
+    // el admin las edita desde el panel y esta constante deja de leerse.
+    const EMPRESAS_INICIALES = {
+      'Agua':               ['Americo Fernandez'],
+      'Aire Acondicionado': ['JAF Aire Acondicionado SRL'],
+      'Aluminio':           ['Carpintería Fasoli','ICB SRL'],
+      'Cerámico':           ['Angel Aciar'],
+      'Cloaca y pluvial':   ['Americo Fernandez'],
+      'Contrapiso':         ['Angel Aciar','Ariel García','Jesús Irazoque'],
+      'Durlock':            ['Renzo Olivares','Sebastián Alaníz'],
+      'Electricidad':       ['Amaya','Dinel SRL','Ismael Atencio'],
+      'Gas':                ['Americo Fernandez','Cortez'],
+      'Incendio':           ['Americo Fernandez','Ariel García','Jesús Irazoque'],
+      'Mampostería':        ['Ariel García','Jesús Irazoque'],
+      'Marcos':             ['Ariel García','Brizuela Oscar','Jesús Irazoque'],
+      'Mármoles':           ['AC Mármoles','Piedra Angular'],
+      'Muebles':            ['Amoblamiento Reno','Carpintería Fasoli','SQL SRL'],
+      'Pintura':            ['Lucas Guzman'],
+      'Placares':           ['Amoblamiento Reno','Carpintería Fasoli','SQL SRL'],
+      'Premarcos':          ['Ariel García','Brizuela Oscar','Jesús Irazoque'],
+      'Revoques interior':  ['Angel Aciar'],
+      'Yeso':               ['Desiderio','Mario Diaz'],
+      'Zócalos':            ['Aldo Moran'],
+    };
     const RESPONSABLES = {
       'Agua':                ['Plomero','Capataz','Otro'],
       'Aire Acondicionado':  ['Subcontratista','Capataz','Otro'],
@@ -101,9 +328,56 @@
       'Zócalos':             ['Subcontratista','Capataz','Otro'],
     };
 
+    // ─── SEGURIDAD: escape de HTML ───────────────────────────────────────────
+    // Cualquier dato que venga de Firestore, Dropbox o de lo que tipeó un usuario
+    // (nombre de plano, descripción de obs, nombre de usuario, etc.) pasa por acá
+    // antes de insertarse con innerHTML. Sin esto, alguien podría meter
+    // <img src=x onerror=...> en una descripción y ejecutar JS en el navegador
+    // de cualquiera que vea esa observación.
+    function escapeHtml(str) {
+      if (str === null || str === undefined) return '';
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+    }
+
     const app = initializeApp(firebaseConfig);
     const auth = getAuth(app);
     const db = getFirestore(app);
+
+    // ─── LOGGING DE ERRORES ────────────────────────────────────────────────
+    // Guarda errores reales que le pasan a los usuarios en Firestore, para que
+    // el admin pueda revisarlos sin depender de que alguien avise manualmente.
+    // Solo se registran errores de usuarios YA autenticados (las reglas de
+    // Firestore exigen estar logueado para escribir acá — permitir escritura
+    // sin autenticación abriría la puerta a que cualquiera llene la colección
+    // de basura). `expiraEn` habilita la limpieza automática vía TTL policy
+    // (30 días) configurada aparte en la consola de Firestore.
+    async function registrarError(contexto, error, extra = {}) {
+      try {
+        const expiraEn = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+        await addDoc(collection(db, 'logs_errores'), {
+          contexto,
+          mensaje: error?.message || String(error) || 'Error desconocido',
+          uid: currentUser?.uid || null,
+          email: currentUser?.email || null,
+          rol: currentUserData?.rol || null,
+          planoId: extra.planoId || null,
+          obsId: extra.obsId || null,
+          userAgent: navigator.userAgent,
+          creadoEn: serverTimestamp(),
+          expiraEn,
+        });
+      } catch (e) {
+        // Si ni siquiera se pudo loguear el error, no hay mucho más para hacer
+        // salvo dejarlo en la consola del navegador como último recurso.
+        console.error('No se pudo registrar el error en Firestore:', e);
+      }
+    }
+
     const storage = getStorage(app);
     const provider = new GoogleAuthProvider();
 
@@ -129,10 +403,10 @@
       return pestañas.get(pestañaActiva);
     }
 
-    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/5.4.149/pdf.worker.min.mjs';
 
     // ─── PANTALLAS ────────────────────────────────────────────────────────────
-    const pantallas = { login: document.getElementById('pantalla-login'), espera: document.getElementById('pantalla-espera'), planos: document.getElementById('pantalla-planos'), inspector: document.getElementById('pantalla-inspector') };
+    const pantallas = { login: document.getElementById('pantalla-login'), espera: document.getElementById('pantalla-espera'), home: document.getElementById('pantalla-home'), planos: document.getElementById('pantalla-planos'), inspector: document.getElementById('pantalla-inspector'), calidad: document.getElementById('pantalla-calidad') };
     function mostrar(n) {
       Object.values(pantallas).forEach(p => p.classList.add('oculto'));
       pantallas[n].classList.remove('oculto');
@@ -156,8 +430,21 @@
       await updateDoc(userRef, { ultimaConexion: serverTimestamp() });
       if (currentUserData.rol === 'admin') document.getElementById('btn-usuarios').style.display = 'block';
       if (currentUserData.rol === 'lector') document.getElementById('btn-agregar-plano').classList.add('oculto');
+      // El nombre del usuario se muestra en el home
+      document.getElementById('home-user-nombre').textContent = currentUserData.nombre || currentUser.email;
+      mostrar('home');
+      // Sembrar empresas de calidad en Firestore si es la primera vez (solo admin)
+      sembrarEmpresasSiFalta().catch(e => console.warn('Seed empresas:', e));
+    });
+
+    // Botones del home
+    document.getElementById('btn-home-inspeccionar').addEventListener('click', () => {
       mostrar('planos');
       iniciarPantallaPlanos();
+    });
+    document.getElementById('btn-home-calidad').addEventListener('click', () => {
+      mostrar('calidad');
+      iniciarPantallaCalidad();
     });
 
     document.getElementById('btn-login').addEventListener('click', async () => {
@@ -173,10 +460,18 @@
     }));
 
     // ─── DROPBOX ──────────────────────────────────────────────────────────────
+    let dropboxTokenExpira = 0; // timestamp (ms) hasta cuándo es válido el access token en caché
     async function getDropboxToken() {
-      if (dropboxToken) return dropboxToken;
-      const res = await fetch('https://api.dropbox.com/oauth2/token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ grant_type: 'refresh_token', refresh_token: DROPBOX_REFRESH_TOKEN, client_id: DROPBOX_APP_KEY, client_secret: DROPBOX_APP_SECRET }) });
-      dropboxToken = (await res.json()).access_token;
+      // Reusar el token en caché si todavía le queda margen (30s de colchón
+      // antes de que expire, para no arrancar una descarga con un token que
+      // vence a mitad de camino).
+      if (dropboxToken && Date.now() < dropboxTokenExpira - 30000) return dropboxToken;
+
+      const res = await fetch(CLOUD_FUNCTION_DROPBOX_TOKEN);
+      if (!res.ok) throw new Error('No se pudo obtener el token de Dropbox (Cloud Function)');
+      const datos = await res.json();
+      dropboxToken = datos.access_token;
+      dropboxTokenExpira = Date.now() + (datos.expires_in * 1000);
       return dropboxToken;
     }
     async function listarCarpeta(path) {
@@ -222,6 +517,83 @@
       }
     }
 
+    // Backfill una sola vez: observaciones existentes que no tengan depto,
+    // bloqueCod o nivelCod los heredan de su plano. El depto cae a "General"
+    // si el plano no es de un depto específico. bloqueCod/nivelCod son
+    // necesarios para que el módulo de Calidad ubique la obs en su celda.
+    // No toca sincronizadoSheet, así que NO dispara re-sincronizaciones al
+    // Sheet. Solo corre para admin y solo escribe los campos que falten.
+    async function migrarDeptoObservaciones() {
+      if (currentUserData?.rol !== 'admin') return;
+      const planosSnap = await getDocs(collection(db,'planos'));
+      const metaPorPlano = {};
+      planosSnap.forEach(d => {
+        const p = d.data();
+        metaPorPlano[d.id] = { depto: p.depto || 'General', bloqueCod: p.bloqueCod || '', nivelCod: p.nivelCod || '' };
+      });
+      const obsSnap = await getDocs(collection(db,'observaciones'));
+      const updates = [];
+      obsSnap.forEach(d => {
+        const o = d.data();
+        const meta = metaPorPlano[o.planoId] || { depto: 'General', bloqueCod: '', nivelCod: '' };
+        const patch = {};
+        if (o.depto === undefined)     patch.depto     = meta.depto;
+        if (o.bloqueCod === undefined) patch.bloqueCod = meta.bloqueCod;
+        if (o.nivelCod === undefined)  patch.nivelCod  = meta.nivelCod;
+        if (Object.keys(patch).length) updates.push(updateDoc(doc(db,'observaciones',d.id), patch));
+      });
+      if (updates.length) { await Promise.all(updates); console.log(`✓ Metadata (depto/bloque/nivel) asignada a ${updates.length} observaciones`); }
+    }
+
+    // Corrección una sola vez: planos que quedaron con un "depto" inválido
+    // (ej: "PLANTA GENERAL" tomado del 5° lugar del nombre antes de que el
+    // parseo validara contra UNIDADES) se re-parsean con la lógica nueva.
+    // Las observaciones que heredaron ese valor inválido también se corrigen:
+    // pasan al depto corregido del plano, o a "General". No toca
+    // sincronizadoSheet. Solo corre para admin.
+    async function corregirDeptosInvalidos() {
+      if (currentUserData?.rol !== 'admin') return;
+
+      // Set de valores válidos: todas las unidades de todos los pisos + General
+      const valoresValidos = new Set(['General']);
+      Object.values(UNIDADES).forEach(niveles =>
+        Object.values(niveles).forEach(unidades =>
+          unidades.forEach(u => valoresValidos.add(u))));
+
+      // 1) Planos: re-parsear con la validación nueva y corregir si difiere
+      const planosSnap = await getDocs(collection(db,'planos'));
+      const deptoCorregidoPorPlano = {};
+      const updatesPlanos = [];
+      planosSnap.forEach(d => {
+        const p = d.data();
+        const meta = parsearNombrePlano(p.nombreOriginal || p.nombre.replace(/ /g, '_'));
+        const deptoCorrecto = meta?.depto || '';
+        deptoCorregidoPorPlano[d.id] = deptoCorrecto;
+        if ((p.depto || '') !== deptoCorrecto) {
+          updatesPlanos.push(updateDoc(doc(db,'planos',d.id), { depto: deptoCorrecto }));
+        }
+      });
+      if (updatesPlanos.length) {
+        await Promise.all(updatesPlanos);
+        console.log(`✓ Depto corregido en ${updatesPlanos.length} planos`);
+      }
+
+      // 2) Observaciones: si el depto guardado no es un valor válido, corregir
+      const obsSnap = await getDocs(collection(db,'observaciones'));
+      const updatesObs = [];
+      obsSnap.forEach(d => {
+        const o = d.data();
+        if (o.depto !== undefined && !valoresValidos.has(o.depto)) {
+          const nuevo = deptoCorregidoPorPlano[o.planoId] || 'General';
+          updatesObs.push(updateDoc(doc(db,'observaciones',d.id), { depto: nuevo }));
+        }
+      });
+      if (updatesObs.length) {
+        await Promise.all(updatesObs);
+        console.log(`✓ Depto corregido en ${updatesObs.length} observaciones`);
+      }
+    }
+
     async function iniciarPantallaPlanos() {
       document.getElementById('user-nombre').textContent = currentUserData.nombre || currentUser.email;
       document.getElementById('user-email').textContent = currentUser.email;
@@ -230,21 +602,29 @@
       // Migrar planos existentes sin metadata (corre silenciosamente)
       migrarMetadataPlanos().catch(e => console.warn('Migración metadata:', e));
 
+      // Migrar observaciones existentes sin depto (corre silenciosamente, solo admin)
+      // y después corregir deptos inválidos que hayan quedado guardados
+      // (encadenadas para que la corrección vea el resultado del backfill)
+      migrarDeptoObservaciones()
+        .then(() => corregirDeptosInvalidos())
+        .catch(e => console.warn('Migración depto:', e));
+
       cargarListaPlanos();
     }
 
     // Listeners de filtros — adjuntados una sola vez al cargar la página
-    document.getElementById('filtro-busqueda').addEventListener('input', aplicarFiltros);
-    document.getElementById('filtro-disciplina').addEventListener('change', aplicarFiltros);
-    document.getElementById('filtro-nivel').addEventListener('change', aplicarFiltros);
-    document.getElementById('filtro-bloque').addEventListener('change', aplicarFiltros);
-    document.getElementById('filtro-depto').addEventListener('change', aplicarFiltros);
+    function onCambioFiltro() { actualizarFiltros(); aplicarFiltros(); }
+    document.getElementById('filtro-busqueda').addEventListener('input', onCambioFiltro);
+    document.getElementById('filtro-disciplina').addEventListener('change', onCambioFiltro);
+    document.getElementById('filtro-nivel').addEventListener('change', onCambioFiltro);
+    document.getElementById('filtro-bloque').addEventListener('change', onCambioFiltro);
+    document.getElementById('filtro-depto').addEventListener('change', onCambioFiltro);
     document.getElementById('btn-limpiar-filtros').addEventListener('click', () => {
       document.getElementById('filtro-busqueda').value = '';
       ['filtro-disciplina','filtro-nivel','filtro-bloque','filtro-depto'].forEach(id => {
         document.getElementById(id).value = '';
       });
-      aplicarFiltros();
+      onCambioFiltro();
     });
     let todosLosPlanos = []; // cache local para filtrado sin re-query
 
@@ -254,20 +634,40 @@
       if (planosUnsubscribe) planosUnsubscribe();
       planosUnsubscribe = onSnapshot(query(collection(db,'planos'), orderBy('creadoEn','desc')), snap => {
         todosLosPlanos = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-        actualizarFiltros();
-        aplicarFiltros();
+        onCambioFiltro();
       });
     }
 
+    // Orden lógico de niveles (no alfabético) — se usa al armar el select de Nivel
+    const ORDEN_NIVELES = ['Subsuelo','Planta Baja','1° Piso','2° Piso','3° Piso','4° Piso','5° Piso','6° Piso','7° Piso','8° Piso','9° Piso','10° Piso','11° Piso','12° Piso','Azotea'];
+
     function actualizarFiltros() {
-      // Reconstruir opciones de cada dropdown con los valores reales existentes
-      const disciplinas = [...new Set(todosLosPlanos.map(p => p.disciplina).filter(Boolean))].sort();
-      const niveles     = [...new Set(todosLosPlanos.map(p => p.nivel).filter(Boolean))].sort((a,b) => {
-        const orden = ['Subsuelo','Planta Baja','1° Piso','2° Piso','3° Piso','4° Piso','5° Piso','6° Piso','7° Piso','8° Piso','9° Piso','10° Piso','11° Piso','12° Piso','Azotea'];
-        return orden.indexOf(a) - orden.indexOf(b);
-      });
-      const bloques     = [...new Set(todosLosPlanos.map(p => p.bloque).filter(Boolean))].sort();
-      const deptos      = [...new Set(todosLosPlanos.map(p => p.depto).filter(Boolean))].sort();
+      // Valores actualmente seleccionados en cada filtro
+      const busqueda   = document.getElementById('filtro-busqueda').value.toLowerCase().trim();
+      const disciplina = document.getElementById('filtro-disciplina').value;
+      const nivel      = document.getElementById('filtro-nivel').value;
+      const bloque     = document.getElementById('filtro-bloque').value;
+      const depto      = document.getElementById('filtro-depto').value;
+
+      // Planos que matchean todos los filtros activos EXCEPTO el del propio select que estamos
+      // armando (si no, un select nunca podría ofrecer otra opción distinta a la ya elegida).
+      // Esto es lo que hace que los filtros queden "conectados" entre sí (facetado).
+      function planosCruzados(campoExcluido) {
+        return todosLosPlanos.filter(p => {
+          if (busqueda && !p.nombre.toLowerCase().includes(busqueda)) return false;
+          if (campoExcluido !== 'disciplina' && disciplina && p.disciplina !== disciplina) return false;
+          if (campoExcluido !== 'nivel'      && nivel      && p.nivel      !== nivel)      return false;
+          if (campoExcluido !== 'bloque'     && bloque     && p.bloque     !== bloque)     return false;
+          if (campoExcluido !== 'depto'      && depto      && p.depto     !== depto)      return false;
+          return true;
+        });
+      }
+
+      const disciplinas = [...new Set(planosCruzados('disciplina').map(p => p.disciplina).filter(Boolean))].sort();
+      const niveles     = [...new Set(planosCruzados('nivel').map(p => p.nivel).filter(Boolean))]
+        .sort((a,b) => ORDEN_NIVELES.indexOf(a) - ORDEN_NIVELES.indexOf(b));
+      const bloques     = [...new Set(planosCruzados('bloque').map(p => p.bloque).filter(Boolean))].sort();
+      const deptos      = [...new Set(planosCruzados('depto').map(p => p.depto).filter(Boolean))].sort();
 
       llenarSelect('filtro-disciplina', disciplinas);
       llenarSelect('filtro-nivel',      niveles);
@@ -284,6 +684,9 @@
         opt.value = o; opt.textContent = o;
         sel.appendChild(opt);
       });
+      // Si la opción que tenía elegida ya no es válida con el cruce actual de filtros
+      // (ej: "Torre" deja de existir al filtrar por un nivel donde no hay Torre), se
+      // limpia sola y vuelve a "Todos" — no queda un filtro "fantasma" aplicado.
       if (prev && opciones.includes(prev)) sel.value = prev;
     }
 
@@ -324,16 +727,16 @@
 
       // Construir badges de metadata
       const badges = [];
-      if (plano.disciplina) badges.push(`<span class="badge-plano">${plano.disciplina}</span>`);
-      if (plano.nivel)      badges.push(`<span class="badge-plano">${plano.nivel}</span>`);
-      if (plano.bloque)     badges.push(`<span class="badge-plano">${plano.bloque}</span>`);
-      if (plano.depto)      badges.push(`<span class="badge-plano">Depto. ${plano.depto}</span>`);
+      if (plano.disciplina) badges.push(`<span class="badge-plano">${escapeHtml(plano.disciplina)}</span>`);
+      if (plano.nivel)      badges.push(`<span class="badge-plano">${escapeHtml(plano.nivel)}</span>`);
+      if (plano.bloque)     badges.push(`<span class="badge-plano">${escapeHtml(plano.bloque)}</span>`);
+      if (plano.depto)      badges.push(`<span class="badge-plano">Depto. ${escapeHtml(plano.depto)}</span>`);
 
       div.innerHTML = `
         <div class="plano-info">
           <div class="plano-icono">📄</div>
           <div class="plano-datos">
-            <div class="plano-nombre">${plano.nombre}</div>
+            <div class="plano-nombre">${escapeHtml(plano.nombre)}</div>
             <div class="plano-badges">${badges.join('') || ''}</div>
             <div class="plano-meta">${plano.paginas||1} página${(plano.paginas||1)>1?'s':''}</div>
           </div>
@@ -372,8 +775,8 @@
           const v = document.createElement('div'); v.className='item-dropbox item-volver'; v.innerHTML='<span>← Volver</span>';
           v.addEventListener('click', () => { dropboxNavPath = dropboxNavStack.pop(); mostrarModalDropbox(); }); lista.appendChild(v);
         }
-        carpetas.forEach(c => { const d=document.createElement('div'); d.className='item-dropbox item-carpeta'; d.innerHTML=`<span>📁 ${c.name}</span><span class="item-arrow">›</span>`; d.addEventListener('click',()=>{dropboxNavStack.push(dropboxNavPath);dropboxNavPath=c.path_lower;mostrarModalDropbox();}); lista.appendChild(d); });
-        pdfs.forEach(f => { const d=document.createElement('div'); d.className='item-dropbox'; d.innerHTML=`<span>📄 ${f.name}</span><button class="btn-seleccionar">Seleccionar</button>`; d.querySelector('.btn-seleccionar').addEventListener('click',()=>{seleccionarDropbox(f);modal.classList.add('oculto');}); lista.appendChild(d); });
+        carpetas.forEach(c => { const d=document.createElement('div'); d.className='item-dropbox item-carpeta'; d.innerHTML=`<span>📁 ${escapeHtml(c.name)}</span><span class="item-arrow">›</span>`; d.addEventListener('click',()=>{dropboxNavStack.push(dropboxNavPath);dropboxNavPath=c.path_lower;mostrarModalDropbox();}); lista.appendChild(d); });
+        pdfs.forEach(f => { const d=document.createElement('div'); d.className='item-dropbox'; d.innerHTML=`<span>📄 ${escapeHtml(f.name)}</span><button class="btn-seleccionar">Seleccionar</button>`; d.querySelector('.btn-seleccionar').addEventListener('click',()=>{seleccionarDropbox(f);modal.classList.add('oculto');}); lista.appendChild(d); });
         if (!carpetas.length && !pdfs.length) lista.innerHTML += '<p style="color:var(--text2);padding:12px 0">Carpeta vacía</p>';
       } catch(e) { lista.innerHTML='<p style="color:var(--danger)">Error al conectar con Dropbox.</p>'; console.error(e); }
     }
@@ -438,6 +841,7 @@
         obsSeleccionada: null,
         scrollX:         0,
         scrollY:         0,
+        renderTaskActual: null,
       };
       pestañas.set(plano.id, estado);
 
@@ -449,7 +853,11 @@
             if (ch.type==='removed') delete estado.observaciones[ch.doc.id];
             else estado.observaciones[ch.doc.id] = { id: ch.doc.id, ...ch.doc.data() };
           });
-          if (pestañaActiva === plano.id) { renderizarMarcadores(); actualizarContadorObs(); }
+          if (pestañaActiva === plano.id) {
+            renderizarMarcadores();
+            actualizarContadorObs();
+            if (!document.getElementById('panel-lista-obs').classList.contains('oculto')) renderizarListaObs();
+          }
         }
       );
 
@@ -511,7 +919,7 @@
         const tab = document.createElement('div');
         tab.className = `pestaña ${planoId === pestañaActiva ? 'activa' : ''}`;
         tab.innerHTML = `
-          <span class="pestaña-nombre">${estado.plano.nombre}</span>
+          <span class="pestaña-nombre">${escapeHtml(estado.plano.nombre)}</span>
           <button class="pestaña-cerrar" data-id="${planoId}">✕</button>
         `;
         tab.addEventListener('click', (e) => {
@@ -549,7 +957,7 @@
         }
         actualizarNavegacionPaginas(estado);
         await renderizarPagina(estado, estado.pagina, true);
-      } catch(e) { console.error(e); alert('Error al cargar el PDF.'); }
+      } catch(e) { console.error(e); alert('Error al cargar el PDF.'); registrarError('cargar_pdf', e, {planoId: estado.plano.id}); }
       finally { spinner.classList.add('oculto'); }
     }
 
@@ -559,6 +967,15 @@
       const canvas = document.getElementById('pdf-canvas');
       const area   = document.getElementById('pdf-area');
       const ctx    = canvas.getContext('2d');
+
+      // Desde pdf.js v4+, renderizar de nuevo sobre el mismo canvas mientras el
+      // render anterior no terminó tira error ("Cannot use the same canvas
+      // during multiple render() operations") — pasa seguido con zoom/paneo
+      // rápido o cambios de página rápidos. Cancelamos el render en curso
+      // (si lo hay) antes de arrancar uno nuevo.
+      if (estado.renderTaskActual) {
+        try { estado.renderTaskActual.cancel(); } catch (e) {}
+      }
 
       if (resetZoom) {
         const vp0 = page.getViewport({ scale: 1 });
@@ -570,7 +987,20 @@
       const vp     = page.getViewport({ scale: escala });
       canvas.width  = vp.width;
       canvas.height = vp.height;
-      await page.render({ canvasContext: ctx, viewport: vp }).promise;
+
+      const tarea = page.render({ canvasContext: ctx, viewport: vp });
+      estado.renderTaskActual = tarea;
+      try {
+        await tarea.promise;
+      } catch (e) {
+        // Un render cancelado por nosotros mismos (arriba) no es un error real —
+        // es justamente lo esperado cuando el usuario zoomea/pasa de página rápido.
+        if (e?.name === 'RenderingCancelledException') return;
+        throw e;
+      } finally {
+        if (estado.renderTaskActual === tarea) estado.renderTaskActual = null;
+      }
+
       renderizarMarcadores();
       document.getElementById('btn-pagina-actual').textContent = `Página ${num} / ${estado.pdfDoc.numPages}`;
       document.getElementById('btn-zoom-nivel').textContent    = Math.round(estado.zoom * 100) + '%';
@@ -698,7 +1128,8 @@
         pin.className  = `pin ${obs.estado==='Resuelta'?'pin-resuelta':'pin-pendiente'}`;
         pin.style.left = (obs.x*canvas.width)+'px';
         pin.style.top  = (obs.y*canvas.height)+'px';
-        pin.textContent = obs.numero||'?';
+        const numeroCorto = (obs.numero||'?').replace(/^OBS-0*/,'') || '0';
+        pin.innerHTML = `<span class="pin-num">${numeroCorto}</span>`;
         pin.title = `${obs.numero} — ${obs.rubro}`;
         pin.addEventListener('click', e=>{e.stopPropagation();abrirPanelObs(obs.id);});
         overlay.appendChild(pin);
@@ -733,9 +1164,56 @@
     }
 
     // ─── PANEL OBS ────────────────────────────────────────────────────────────
+    // Puebla el select de Depto/Unidad según el plano de la pestaña:
+    // - Plano de un depto específico → valor fijo (el del plano), no editable.
+    // - Plano de planta completa con nivel/bloque conocidos → "General" +
+    //   las unidades reales de ese piso según UNIDADES.
+    // - Plano sin nomenclatura parseable → solo "General" (una unidad suelta
+    //   sin nivel/bloque sería ambigua: hay "A" en seis pisos distintos).
+    function poblarSelectDepto(est, valorActual = '') {
+      const sel = document.getElementById('obs-depto');
+      const plano = est.plano;
+      sel.innerHTML = '';
+
+      // Plano de un depto específico → valor fijo, no editable
+      if (plano.depto) {
+        const o = document.createElement('option');
+        o.value = plano.depto; o.textContent = etiquetaUnidad(plano.depto);
+        sel.appendChild(o);
+        sel.value = plano.depto;
+        sel.disabled = true;
+        return;
+      }
+
+      sel.disabled = false;
+      const og = document.createElement('option');
+      og.value = 'General'; og.textContent = 'General (sin depto)';
+      sel.appendChild(og);
+
+      // Planta completa con nivel/bloque conocidos → unidades reales de ese piso
+      const unidades = UNIDADES[plano.bloqueCod]?.[plano.nivelCod] || [];
+      unidades.forEach(u => {
+        const o = document.createElement('option');
+        o.value = u; o.textContent = etiquetaUnidad(u);
+        sel.appendChild(o);
+      });
+
+      // Si la obs guardada tiene un depto que no figura en la lista (ej: cambió
+      // la estructura, o vino de la migración), agregarlo igual para no perderlo
+      if (valorActual && ![...sel.options].some(o => o.value === valorActual)) {
+        const o = document.createElement('option');
+        o.value = valorActual; o.textContent = etiquetaUnidad(valorActual);
+        sel.appendChild(o);
+      }
+      sel.value = valorActual || 'General';
+
+      if (currentUserData?.rol === 'lector') sel.disabled = true;
+    }
+
     function abrirPanelNuevaObs(x, y) {
       const est = pestañaActual(); if (!est) return;
       est.obsSeleccionada = null; limpiarFormulario();
+      poblarSelectDepto(est);
       document.getElementById('panel-titulo').textContent='Nueva observación';
       document.getElementById('obs-x').value=x; document.getElementById('obs-y').value=y;
       document.getElementById('obs-estado-grupo').classList.add('oculto');
@@ -750,6 +1228,15 @@
       const esLector=currentUserData?.rol==='lector';
       document.getElementById('panel-titulo').textContent=obs.numero||'Observación';
       document.getElementById('obs-x').value=obs.x; document.getElementById('obs-y').value=obs.y;
+      // Si la obs tiene un rubro viejo que ya no está en la lista maestra
+      // (ej: "Marmoles", "Carpintería aluminio", "Revoque y Contrapiso"),
+      // lo agregamos como opción para no perderlo al abrir/guardar.
+      const selRubroObs = document.getElementById('obs-rubro');
+      if (obs.rubro && ![...selRubroObs.options].some(o => o.value === obs.rubro)) {
+        const o = document.createElement('option');
+        o.value = obs.rubro; o.textContent = obs.rubro + ' (histórico)';
+        selRubroObs.appendChild(o);
+      }
       document.getElementById('obs-rubro').value=obs.rubro||'';
       actualizarResponsables(obs.rubro);
       document.getElementById('obs-responsable').value=obs.responsable||'';
@@ -775,12 +1262,63 @@
         ['obs-rubro','obs-responsable','obs-descripcion','obs-severidad','obs-estado','obs-nota'].forEach(id=>{document.getElementById(id).disabled=false;});
         document.getElementById('obs-foto').disabled=false;
       }
+      // Después del bloque lector/no-lector: poblarSelectDepto decide por sí
+      // sola si el select queda deshabilitado (plano con depto fijo o rol lector)
+      poblarSelectDepto(est, obs.depto || '');
       document.getElementById('btn-guardar-obs').textContent='Actualizar';
       abrirPanel();
     }
     function abrirPanel() { document.getElementById('panel-obs').classList.remove('oculto'); document.getElementById('panel-obs').classList.add('abierto'); }
     function cerrarPanel() { document.getElementById('panel-obs').classList.remove('abierto'); setTimeout(()=>document.getElementById('panel-obs').classList.add('oculto'),300); const est=pestañaActual(); if(est) est.obsSeleccionada=null; }
     document.getElementById('btn-cerrar-panel').addEventListener('click', cerrarPanel);
+
+    // ─── PANEL LISTA DE OBSERVACIONES ─────────────────────────────────────────
+    document.getElementById('btn-lista-obs').addEventListener('click', () => {
+      renderizarListaObs();
+      document.getElementById('panel-lista-obs').classList.remove('oculto');
+      document.getElementById('panel-lista-obs').classList.add('abierto');
+    });
+
+    document.getElementById('btn-cerrar-lista-obs').addEventListener('click', () => {
+      document.getElementById('panel-lista-obs').classList.remove('abierto');
+      setTimeout(() => document.getElementById('panel-lista-obs').classList.add('oculto'), 300);
+    });
+
+    document.getElementById('lista-obs-filtro-estado').addEventListener('change', renderizarListaObs);
+
+    function renderizarListaObs() {
+      const est = pestañaActual(); if (!est) return;
+      const filtroEstado = document.getElementById('lista-obs-filtro-estado').value;
+      const cont = document.getElementById('lista-obs-items');
+
+      let obs = Object.values(est.observaciones).sort((a,b) => (a.numero||'').localeCompare(b.numero||''));
+      if (filtroEstado) obs = obs.filter(o => o.estado === filtroEstado);
+
+      if (obs.length === 0) {
+        cont.innerHTML = `<div class="empty-state" style="padding:40px 20px"><div class="empty-icon">📋</div><p>No hay observaciones${filtroEstado ? ' con ese estado' : ' en este plano'}.</p></div>`;
+        return;
+      }
+
+      cont.innerHTML = '';
+      obs.forEach(o => {
+        const item = document.createElement('div');
+        item.className = 'item-lista-obs';
+        item.innerHTML = `
+          <div class="item-lista-obs-header">
+            <span class="item-lista-obs-numero">${escapeHtml(o.numero)}</span>
+            <span class="badge-estado ${o.estado==='Resuelta'?'badge-resuelta':'badge-pendiente'}">${escapeHtml(o.estado)}</span>
+          </div>
+          <div class="item-lista-obs-rubro">${escapeHtml(o.rubro)}${o.responsable ? ' · '+escapeHtml(o.responsable) : ''}</div>
+          <div class="item-lista-obs-desc">${escapeHtml(o.descripcion)}</div>
+          <div class="item-lista-obs-meta">Pág. ${o.pagina}${o.depto && o.depto!=='General' ? ' · Depto: '+escapeHtml(etiquetaUnidad(o.depto)) : ''} · Severidad: ${escapeHtml(o.severidad)}</div>
+        `;
+        item.addEventListener('click', () => {
+          document.getElementById('btn-cerrar-lista-obs').click();
+          setTimeout(() => abrirPanelObs(o.id), 200);
+        });
+        cont.appendChild(item);
+      });
+    }
 
     function limpiarFormulario() {
       document.getElementById('obs-rubro').value=''; document.getElementById('obs-responsable').value='';
@@ -805,6 +1343,9 @@
     document.getElementById('obs-estado').addEventListener('change', ()=>{ document.getElementById('obs-nota-grupo').classList.toggle('oculto',document.getElementById('obs-estado').value!=='Resuelta'); });
     document.getElementById('obs-foto').addEventListener('change', e=>{ const f=e.target.files[0];if(!f)return;const r=new FileReader();r.onload=ev=>{document.getElementById('obs-foto-preview').src=ev.target.result;document.getElementById('obs-foto-preview').classList.remove('oculto');document.getElementById('btn-eliminar-foto').classList.remove('oculto');};r.readAsDataURL(f); });
 
+    document.getElementById('obs-foto-preview').addEventListener('click', (e) => {
+      if (e.target.src) window.open(e.target.src, '_blank');
+    });
     document.getElementById('btn-eliminar-foto').addEventListener('click', () => {
       // Marcar foto para eliminar — se borra al guardar
       document.getElementById('obs-foto-preview').src = '';
@@ -836,6 +1377,7 @@
       const severidad=document.getElementById('obs-severidad').value;
       const estado=document.getElementById('obs-estado').value;
       const nota=document.getElementById('obs-nota').value.trim();
+      const depto=document.getElementById('obs-depto').value||'General';
       const x=parseFloat(document.getElementById('obs-x').value);
       const y=parseFloat(document.getElementById('obs-y').value);
       if(!rubro||!descripcion){alert('Completá al menos el rubro y la descripción.');return;}
@@ -855,15 +1397,18 @@
         }
         fotoInput.dataset.eliminada = '';
         if(est.obsSeleccionada){
-          const data={rubro,responsable,descripcion,severidad,estado,notaResolucion:nota,fotoUrl,actualizadoEn:serverTimestamp(),sincronizadoSheet:false};
+          const data={rubro,responsable,descripcion,severidad,estado,depto,notaResolucion:nota,fotoUrl,actualizadoEn:serverTimestamp(),sincronizadoSheet:false};
           if(estado==='Resuelta'&&est.observaciones[est.obsSeleccionada]?.estado!=='Resuelta')data.resueltaEn=serverTimestamp();
           await updateDoc(doc(db,'observaciones',est.obsSeleccionada),data);
         } else {
           const numero = await obtenerSiguienteNumeroGlobal();
-          await addDoc(collection(db,'observaciones'),{planoId:est.plano.id,numero,pagina:est.pagina,x,y,rubro,responsable,descripcion,severidad,estado:'Pendiente',notaResolucion:'',fotoUrl,creadoPor:currentUser.uid,creadoEn:serverTimestamp(),resueltaEn:null,sincronizadoSheet:false});
+          // bloqueCod/nivelCod se copian del plano para que el módulo de Calidad
+          // pueda ubicar la obs en la celda correcta (el depto solo no alcanza: hay
+          // "A" en seis pisos distintos).
+          await addDoc(collection(db,'observaciones'),{planoId:est.plano.id,numero,pagina:est.pagina,x,y,depto,bloqueCod:est.plano.bloqueCod||'',nivelCod:est.plano.nivelCod||'',rubro,responsable,descripcion,severidad,estado:'Pendiente',notaResolucion:'',fotoUrl,creadoPor:currentUser.uid,creadoEn:serverTimestamp(),resueltaEn:null,sincronizadoSheet:false});
         }
         cerrarPanel();
-      } catch(e){console.error(e);alert('Error al guardar.');}
+      } catch(e){console.error(e);alert('Error al guardar.');registrarError('guardar_observacion', e, {planoId: est.plano.id});}
       finally{btn.disabled=false;btn.textContent=est.obsSeleccionada?'Actualizar':'Guardar';}
     });
 
@@ -874,8 +1419,8 @@
       if(obs.fotoUrl){try{await deleteObject(ref(storage,obs.fotoUrl));}catch(e){}}
       await deleteDoc(doc(db,'observaciones',est.obsSeleccionada));
       try {
-        await fetch(APPS_SCRIPT_URL, { method:'POST', body:JSON.stringify({accion:'delete',id:obs.numero}) });
-      } catch(e) { console.warn('No se pudo borrar del Sheet:', e); }
+        await llamarAppsScript({accion:'delete',id:obs.numero});
+      } catch(e) { console.warn('No se pudo borrar del Sheet:', e); registrarError('eliminar_obs_sheet', e, {obsId: obs.numero, planoId: est.plano.id}); }
       cerrarPanel();
     });
 
@@ -888,11 +1433,11 @@
       let errores=0;
       for(const obs of noSync){
         try{
-          const res=await fetch(APPS_SCRIPT_URL,{method:'POST',body:JSON.stringify({accion:'upsert',id:obs.numero,obra:OBRA_NOMBRE,plano:est.plano.nombre,pagina:obs.pagina,rubro:obs.rubro,descripcion:obs.descripcion,severidad:obs.severidad,responsable:obs.responsable,foto:obs.fotoUrl||'',fechaCreacion:obs.creadoEn?.toDate?.()?.toLocaleDateString('es-AR')||'',estado:obs.estado,notaResolucion:obs.notaResolucion||'',fechaResolucion:obs.resueltaEn?.toDate?.()?.toLocaleDateString('es-AR')||''})});
-          if(res.ok)await updateDoc(doc(db,'observaciones',obs.id),{sincronizadoSheet:true});else errores++;
-        }catch(e){console.error(e);errores++;}
+          const res=await llamarAppsScript({accion:'upsert',id:obs.numero,obra:OBRA_NOMBRE,plano:est.plano.nombre,pagina:obs.pagina,depto:obs.depto||'',rubro:obs.rubro,descripcion:obs.descripcion,severidad:obs.severidad,responsable:obs.responsable,foto:obs.fotoUrl||'',fechaCreacion:obs.creadoEn?.toDate?.()?.toLocaleDateString('es-AR')||'',estado:obs.estado,notaResolucion:obs.notaResolucion||'',fechaResolucion:obs.resueltaEn?.toDate?.()?.toLocaleDateString('es-AR')||''});
+          if(res.ok)await updateDoc(doc(db,'observaciones',obs.id),{sincronizadoSheet:true});else{errores++;registrarError('certificar', new Error(`Respuesta no-ok del servidor (status ${res.status})`), {obsId: obs.numero, planoId: est.plano.id});}
+        }catch(e){console.error(e);errores++;registrarError('certificar', e, {obsId: obs.numero, planoId: est.plano.id});}
       }
-      btn.disabled=false;btn.textContent='✓ Certificar';
+      btn.disabled=false;btn.innerHTML=ICONO_CERTIFICAR;
       if(!errores){
         mostrarToast(`✓ ${noSync.length} observación/es certificadas`);
         setTimeout(() => cerrarPestaña(pestañaActiva), 1500);
@@ -900,6 +1445,193 @@
         alert(`Se certificaron ${noSync.length-errores} de ${noSync.length}.`);
       }
     });
+
+    // ─── INFORME PDF ──────────────────────────────────────────────────────────
+    let blobUrlInformeActual = null;
+    let nombreInformeActual  = '';
+
+    document.getElementById('btn-imprimir-informe').addEventListener('click', async () => {
+      const est = pestañaActual(); if (!est?.pdfDoc) return;
+      const btn = document.getElementById('btn-imprimir-informe');
+      btn.disabled = true; btn.textContent = 'Generando...';
+      try {
+        const blob = await generarInformePDF(est);
+        // Mismo nombre que el título interno del PDF — es el que va a usar el botón Descargar
+        nombreInformeActual  = `Informe_${est.plano.nombre.replace(/[^\w\-]+/g,'_')}_${new Date().toISOString().slice(0,10)}.pdf`;
+        blobUrlInformeActual = URL.createObjectURL(blob);
+        // #toolbar=0 oculta la barra del visor de Chrome (cuyo botón de descarga
+        // guarda con un UUID ilegible). Descargar e Imprimir se hacen desde los
+        // botones propios del modal, que sí controlan el nombre del archivo.
+        document.getElementById('iframe-informe').src = blobUrlInformeActual + '#toolbar=0';
+        document.getElementById('modal-informe').classList.remove('oculto');
+      }
+      catch(e) { console.error(e); alert('Error al generar el informe.'); registrarError('generar_informe', e, {planoId: est.plano.id}); }
+      finally { btn.disabled = false; btn.innerHTML = ICONO_INFORME; }
+    });
+
+    document.getElementById('btn-cerrar-modal-informe').addEventListener('click', () => {
+      document.getElementById('modal-informe').classList.add('oculto');
+      document.getElementById('iframe-informe').src = '';
+      if (blobUrlInformeActual) { URL.revokeObjectURL(blobUrlInformeActual); blobUrlInformeActual = null; }
+    });
+
+    // Descargar con nombre legible (Informe_<plano>_<fecha>.pdf) — el botón del
+    // visor de Chrome no permite controlar el nombre de un blob URL.
+    document.getElementById('btn-descargar-informe').addEventListener('click', () => {
+      if (!blobUrlInformeActual) return;
+      const a = document.createElement('a');
+      a.href = blobUrlInformeActual;
+      a.download = nombreInformeActual;
+      a.click();
+    });
+
+    // Imprimir el PDF del iframe. El focus() previo evita que Chrome imprima
+    // la página padre en lugar del PDF en algunos casos.
+    document.getElementById('btn-imprimir-informe-modal').addEventListener('click', () => {
+      const iframe = document.getElementById('iframe-informe');
+      if (!iframe.src) return;
+      iframe.contentWindow.focus();
+      iframe.contentWindow.print();
+    });
+
+    async function generarInformePDF(est) {
+      const { jsPDF } = window.jspdf;
+      const numPaginas = est.pdfDoc.numPages;
+      let doc = null;
+
+      for (let num = 1; num <= numPaginas; num++) {
+        const page = await est.pdfDoc.getPage(num);
+
+        // Resolución FIJA para el informe — no depende del ancho de pantalla del dispositivo
+        // que abrió el plano (eso es lo que hacía que el plano y los pines salieran
+        // de tamaño relativo distinto según si se generaba desde celular o compu).
+        const ANCHO_INFORME = 1600;
+        const vp0 = page.getViewport({ scale: 1 });
+        const vp  = page.getViewport({ scale: ANCHO_INFORME / vp0.width });
+
+        // Render offscreen — no toca el canvas visible
+        const canvas = document.createElement('canvas');
+        canvas.width = vp.width; canvas.height = vp.height;
+        const ctx = canvas.getContext('2d');
+        await page.render({ canvasContext: ctx, viewport: vp }).promise;
+
+        // Observaciones de esta página
+        const obsPagina = Object.values(est.observaciones)
+          .filter(o => o.pagina === num)
+          .sort((a,b) => (a.numero||'').localeCompare(b.numero||''));
+
+        // Pines sobre el canvas offscreen — tamaño proporcional al canvas (que ahora
+        // siempre tiene el mismo ancho fijo), no en píxeles fijos.
+        const radioPin = canvas.width * 0.017;
+        const fontPin  = radioPin * 0.9;
+
+        // Posición real (ancla) y posición de dibujo (puede separarse si hay solapamiento)
+        const posiciones = obsPagina.map(obs => ({
+          obs,
+          ox: obs.x * canvas.width, oy: obs.y * canvas.height,
+          x:  obs.x * canvas.width, y:  obs.y * canvas.height,
+        }));
+
+        // Si dos pines quedan más cerca que esta distancia, se empujan entre sí hasta separarse.
+        // Es el mínimo indispensable para que el número del pin de atrás no quede tapado por
+        // el de adelante — los círculos pueden seguir solapándose en el borde, solo se cuida
+        // que el centro (donde va el número) no se pise.
+        const distanciaMinima = radioPin * 1.4;
+        for (let iter = 0; iter < 60; iter++) {
+          let movioAlguno = false;
+          for (let i = 0; i < posiciones.length; i++) {
+            for (let j = i + 1; j < posiciones.length; j++) {
+              const a = posiciones[i], b = posiciones[j];
+              const dx = b.x - a.x, dy = b.y - a.y;
+              const dist = Math.hypot(dx, dy) || 0.01;
+              if (dist < distanciaMinima) {
+                const empuje = (distanciaMinima - dist) / 2;
+                const ux = dx / dist, uy = dy / dist;
+                a.x -= ux * empuje; a.y -= uy * empuje;
+                b.x += ux * empuje; b.y += uy * empuje;
+                movioAlguno = true;
+              }
+            }
+          }
+          if (!movioAlguno) break;
+        }
+
+        posiciones.forEach(({ obs, ox, oy, x, y }) => {
+          // Si el pin se separó de su lugar real, marcamos el punto real con un puntito
+          // y trazamos una línea fina hasta el pin — así no se pierde la ubicación exacta.
+          if (Math.hypot(x - ox, y - oy) > 1) {
+            ctx.beginPath(); ctx.moveTo(ox, oy); ctx.lineTo(x, y);
+            ctx.strokeStyle = 'rgba(0,0,0,0.55)'; ctx.lineWidth = 1; ctx.stroke();
+            ctx.beginPath(); ctx.arc(ox, oy, radioPin * 0.18, 0, Math.PI*2);
+            ctx.fillStyle = 'rgba(0,0,0,0.7)'; ctx.fill();
+          }
+
+          const color = obs.estado === 'Resuelta' ? '#2ecc71' : '#ff4f4f';
+          ctx.beginPath(); ctx.arc(x, y, radioPin, 0, Math.PI*2);
+          ctx.fillStyle = color; ctx.fill();
+          ctx.lineWidth = radioPin * 0.14; ctx.strokeStyle = '#fff'; ctx.stroke();
+          ctx.fillStyle = '#fff'; ctx.font = `bold ${fontPin}px sans-serif`;
+          ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+          ctx.fillText((obs.numero||'?').replace(/^OBS-0*/,'') || '0', x, y);
+        });
+
+        const imgData = canvas.toDataURL('image/jpeg', 0.85);
+        const orientacion = canvas.width > canvas.height ? 'l' : 'p';
+
+        if (!doc) {
+          doc = new jsPDF({ orientation: orientacion, unit: 'pt', format: 'a4' });
+          doc.setProperties({ title: `Informe_${est.plano.nombre.replace(/[^\w\-]+/g,'_')}_${new Date().toISOString().slice(0,10)}` });
+        }
+        else doc.addPage('a4', orientacion);
+
+        const margen = 28;
+        const pageW = doc.internal.pageSize.getWidth();
+        const pageH = doc.internal.pageSize.getHeight();
+        const anchoUtil = pageW - margen*2;
+
+        let y = margen;
+
+        // La imagen nunca puede pasarse de la hoja: la acotamos por ancho Y por alto disponible.
+        // Reservamos lugar para que entren el encabezado de la tabla + 4 filas debajo de la imagen.
+        // Subimos el alto estimado por fila (antes 18pt, justo) y contamos también el espacio que
+        // separa la imagen de la tabla (antes se sumaba aparte y se comía parte de la reserva).
+        // Si hay más de 4 observaciones, las filas extra pasan solas a la hoja siguiente (autoTable se encarga).
+        const ALTO_FILA_TABLA = 24;
+        const FILAS_GARANTIZADAS = 4;
+        const ESPACIO_IMAGEN_TABLA = 16;
+        const altoReservadoTabla = ALTO_FILA_TABLA * (FILAS_GARANTIZADAS + 1) + ESPACIO_IMAGEN_TABLA; // +1 = encabezado
+        const altoMaxImagen = pageH - y - margen - altoReservadoTabla;
+        const altoPorAncho  = anchoUtil * (canvas.height / canvas.width);
+        const altoImg = Math.min(altoPorAncho, altoMaxImagen);
+        const anchoImg = altoImg * (canvas.width / canvas.height);
+        const xImg = margen + (anchoUtil - anchoImg) / 2; // centrada si quedó más angosta que el ancho útil
+
+        doc.addImage(imgData, 'JPEG', xImg, y, anchoImg, altoImg);
+        y += altoImg + ESPACIO_IMAGEN_TABLA;
+
+        const filas = obsPagina.map(o => [
+          o.numero||'', o.rubro||'', o.descripcion||'', o.severidad||'',
+          o.responsable||'', o.estado||'', o.creadoEn?.toDate?.()?.toLocaleDateString('es-AR')||'',
+        ]);
+
+        if (filas.length) {
+          doc.autoTable({
+            startY: y,
+            head: [['N°','Rubro','Descripción','Severidad','Responsable','Estado','Fecha']],
+            body: filas,
+            margin: { left: margen, right: margen },
+            styles: { fontSize: 8, cellPadding: 4 },
+            headStyles: { fillColor: [26,26,26], textColor: [200,169,110] },
+          });
+        } else {
+          doc.setFontSize(10); doc.setTextColor(150);
+          doc.text('Sin observaciones en esta página.', margen, y+10);
+          doc.setTextColor(0);
+        }
+      }
+
+      return doc.output('blob');
+    }
 
     function mostrarToast(msg){const t=document.getElementById('toast');t.textContent=msg;t.classList.remove('oculto');t.classList.add('visible');setTimeout(()=>{t.classList.remove('visible');setTimeout(()=>t.classList.add('oculto'),300);},3000);}
 
@@ -911,11 +1643,498 @@
       const snap=await getDocs(collection(db,'usuarios'));lista.innerHTML='';
       snap.forEach(d=>{
         const u={id:d.id,...d.data()};const div=document.createElement('div');div.className='item-usuario';
-        div.innerHTML=`<div class="usuario-info"><div class="usuario-nombre">${u.nombre||u.email}</div><div class="usuario-email">${u.email}</div></div><div class="usuario-acciones"><select class="sel-rol" data-uid="${u.id}" style="width:90px;padding:5px 6px;font-size:11px;"><option value="lector" ${u.rol==='lector'?'selected':''}>Lector</option><option value="inspector" ${u.rol==='inspector'?'selected':''}>Inspector</option><option value="admin" ${u.rol==='admin'?'selected':''}>Admin</option></select><button class="btn-toggle-auth ${u.autorizado?'activo':''}" data-uid="${u.id}" data-auth="${u.autorizado}">${u.autorizado?'✓ Autorizado':'Autorizar'}</button></div>`;
+        div.innerHTML=`<div class="usuario-info"><div class="usuario-nombre">${escapeHtml(u.nombre||u.email)}</div><div class="usuario-email">${escapeHtml(u.email)}</div></div><div class="usuario-acciones"><select class="sel-rol" data-uid="${u.id}" style="width:90px;padding:5px 6px;font-size:11px;"><option value="lector" ${u.rol==='lector'?'selected':''}>Lector</option><option value="inspector" ${u.rol==='inspector'?'selected':''}>Inspector</option><option value="admin" ${u.rol==='admin'?'selected':''}>Admin</option></select><button class="btn-toggle-auth ${u.autorizado?'activo':''}" data-uid="${u.id}" data-auth="${u.autorizado}">${u.autorizado?'✓ Autorizado':'Autorizar'}</button></div>`;
         div.querySelector('.btn-toggle-auth').addEventListener('click',async e=>{const b=e.currentTarget;await updateDoc(doc(db,'usuarios',b.dataset.uid),{autorizado:b.dataset.auth!=='true'});cargarPanelUsuarios();});
         const rs=div.querySelector('.sel-rol');if(rs)rs.addEventListener('change',async e=>{await updateDoc(doc(db,'usuarios',e.currentTarget.dataset.uid),{rol:e.currentTarget.value});});
         lista.appendChild(div);
       });
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // ─── MÓDULO CALIDAD ───────────────────────────────────────────────────────
+    // ══════════════════════════════════════════════════════════════════════════
+
+    // Cache en memoria del universo de datos para calcular estados. Se carga al
+    // entrar a Calidad y se refresca tras certificar o con el botón Actualizar.
+    let calidadObs = [];          // todas las observaciones
+    let calidadCerts = [];        // todos los certificados
+    let empresasCalidad = {};     // { rubro: [empresas] } desde config/empresas
+    let calidadUnidadSel = null;  // { bloqueCod, nivelCod, depto } de la unidad tocada
+
+    // Volver al home desde planos o calidad
+    document.querySelectorAll('.btn-ir-home').forEach(b => b.addEventListener('click', () => mostrar('home')));
+
+    // ── Semilla de empresas en Firestore (una vez) ──
+    async function sembrarEmpresasSiFalta() {
+      if (currentUserData?.rol !== 'admin') return;
+      const ref = doc(db, 'config', 'empresas');
+      const snap = await getDoc(ref);
+      if (!snap.exists()) {
+        await setDoc(ref, { porRubro: EMPRESAS_INICIALES, actualizadoEn: serverTimestamp() });
+        console.log('✓ config/empresas sembrado con las empresas iniciales');
+      }
+    }
+
+    async function cargarEmpresas() {
+      try {
+        const snap = await getDoc(doc(db, 'config', 'empresas'));
+        empresasCalidad = snap.exists() ? (snap.data().porRubro || {}) : {};
+      } catch (e) { empresasCalidad = {}; console.warn('cargarEmpresas', e); }
+    }
+
+    // ── Carga de datos para el cálculo de estados ──
+    async function cargarDatosCalidad() {
+      const [obsSnap, certSnap] = await Promise.all([
+        getDocs(collection(db, 'observaciones')),
+        getDocs(collection(db, 'certificados')),
+      ]);
+      calidadObs   = obsSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+      calidadCerts = certSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+    }
+
+    // ── Cálculo del estado de una celda (bloque+nivel+depto+rubro) ──
+    // El estado NO se guarda: se deriva siempre de las obs y los certificados.
+    function estadoCelda(bloqueCod, nivelCod, depto, rubro) {
+      const obs = calidadObs.filter(o =>
+        o.rubro === rubro && o.depto === depto &&
+        o.bloqueCod === bloqueCod && o.nivelCod === nivelCod);
+      const certs = calidadCerts.filter(c =>
+        c.rubro === rubro && c.depto === depto &&
+        c.bloqueCod === bloqueCod && c.nivelCod === nivelCod);
+
+      const pendientes = obs.filter(o => o.estado === 'Pendiente');
+      const resueltas  = obs.filter(o => o.estado === 'Resuelta');
+
+      // Prioridad visual: lo pendiente gana siempre, aunque ya exista certificado.
+      if (pendientes.length) return { estado: 'con-pendientes', puedeCertificar: false, obs, certs };
+
+      if (certs.length) {
+        // ¿Todas las obs resueltas actuales están cubiertas por algún certificado?
+        const cubiertas = new Set();
+        certs.forEach(c => (c.obsCubiertas || []).forEach(x => cubiertas.add(x.id)));
+        const todasCubiertas = resueltas.every(o => cubiertas.has(o.id));
+        if (todasCubiertas) return { estado: 'certificada', puedeCertificar: false, obs, certs };
+        // Hay obs resueltas nuevas no cubiertas → re-certificación disponible
+        return { estado: 'lista', puedeCertificar: true, obs, certs };
+      }
+
+      if (resueltas.length) return { estado: 'lista', puedeCertificar: true, obs, certs };
+      return { estado: 'sin-inspeccion', puedeCertificar: true, obs, certs };
+    }
+
+    const ESTADO_LABEL = {
+      'sin-inspeccion': 'Sin inspección',
+      'con-pendientes': 'Con pendientes',
+      'lista':          'Listo para certificar',
+      'certificada':    'Certificado',
+    };
+
+    // ── Pantalla Calidad ──
+    async function iniciarPantallaCalidad() {
+      // Poblar selector de rubros certificables (una vez)
+      const selRubro = document.getElementById('cal-rubro');
+      if (!selRubro.dataset.poblado) {
+        selRubro.innerHTML = '<option value="">— Elegí un rubro —</option>';
+        RUBROS_CERTIFICABLES.forEach(r => {
+          const o = document.createElement('option'); o.value = r; o.textContent = r; selRubro.appendChild(o);
+        });
+        selRubro.dataset.poblado = '1';
+      }
+      // Botón de admin de empresas solo para admin
+      document.getElementById('cal-btn-empresas').classList.toggle('oculto', currentUserData?.rol !== 'admin');
+
+      document.getElementById('cal-croquis-cont').innerHTML =
+        '<div class="cal-placeholder">Elegí bloque, nivel y rubro para ver el croquis.</div>';
+      await cargarEmpresas();
+      await cargarDatosCalidad();
+    }
+
+    // Poblar selector de niveles según el bloque elegido
+    function actualizarNivelesCalidad() {
+      const bloque = document.getElementById('cal-bloque').value;
+      const selNivel = document.getElementById('cal-nivel');
+      selNivel.innerHTML = '<option value="">— Nivel —</option>';
+      if (!bloque) return;
+      // Orden por código numérico de nivel
+      const niveles = Object.keys(UNIDADES[bloque] || {}).sort((a, b) => parseInt(a) - parseInt(b));
+      niveles.forEach(nc => {
+        const o = document.createElement('option');
+        o.value = nc; o.textContent = NIVELES[nc] || ('Nivel ' + nc);
+        selNivel.appendChild(o);
+      });
+    }
+
+    document.getElementById('cal-bloque').addEventListener('change', () => {
+      actualizarNivelesCalidad();
+      renderizarCroquisCalidad();
+    });
+    document.getElementById('cal-nivel').addEventListener('change', renderizarCroquisCalidad);
+    document.getElementById('cal-rubro').addEventListener('change', renderizarCroquisCalidad);
+    document.getElementById('cal-btn-actualizar').addEventListener('click', async () => {
+      const btn = document.getElementById('cal-btn-actualizar');
+      btn.disabled = true;
+      await cargarDatosCalidad();
+      renderizarCroquisCalidad();
+      btn.disabled = false;
+      mostrarToast('Datos actualizados');
+    });
+
+    function renderizarCroquisCalidad() {
+      const bloque = document.getElementById('cal-bloque').value;
+      const nivel  = document.getElementById('cal-nivel').value;
+      const rubro  = document.getElementById('cal-rubro').value;
+      const cont   = document.getElementById('cal-croquis-cont');
+
+      if (!bloque || !nivel || !rubro) {
+        cont.innerHTML = '<div class="cal-placeholder">Elegí bloque, nivel y rubro para ver el croquis.</div>';
+        return;
+      }
+
+      const croquisId = CROQUIS_POR_NIVEL[bloque]?.[nivel];
+      if (!croquisId || !CROQUIS_SVG[croquisId]) {
+        cont.innerHTML = `<div class="cal-placeholder">Todavía no hay croquis cargado para ${escapeHtml(NIVELES[nivel]||nivel)} · ${escapeHtml(BLOQUES[bloque]||bloque)}.<br><span style="font-size:12px;color:var(--text2)">Se agregará cuando esté disponible.</span></div>`;
+        return;
+      }
+
+      cont.innerHTML = CROQUIS_SVG[croquisId];
+      const svg = cont.querySelector('svg');
+      svg.querySelectorAll('.unidad').forEach(u => {
+        const depto = u.dataset.unidad;
+        const { estado } = estadoCelda(bloque, nivel, depto, rubro);
+        u.classList.add('estado-' + estado);
+        u.style.cursor = 'pointer';
+        u.addEventListener('click', () => abrirDetalleUnidad(bloque, nivel, depto, rubro));
+      });
+    }
+
+    // ── Panel de detalle de una unidad ──
+    function abrirDetalleUnidad(bloqueCod, nivelCod, depto, rubro) {
+      calidadUnidadSel = { bloqueCod, nivelCod, depto, rubro };
+      const info = estadoCelda(bloqueCod, nivelCod, depto, rubro);
+      const esLector = currentUserData?.rol === 'lector';
+
+      document.getElementById('cal-detalle-titulo').textContent =
+        `${etiquetaUnidad(depto)} · ${rubro}`;
+      document.getElementById('cal-detalle-sub').textContent =
+        `${BLOQUES[bloqueCod]||bloqueCod} · ${NIVELES[nivelCod]||nivelCod}`;
+
+      const badge = document.getElementById('cal-detalle-estado');
+      badge.textContent = ESTADO_LABEL[info.estado];
+      badge.className = 'cal-badge-estado estado-badge-' + info.estado;
+
+      // Observaciones
+      let obsHtml = '';
+      if (info.obs.length) {
+        obsHtml = info.obs
+          .sort((a,b) => (a.numero||'').localeCompare(b.numero||''))
+          .map(o => `<div class="cal-obs-item ${o.estado==='Resuelta'?'res':'pend'}">
+            <div class="cal-obs-head"><strong>${escapeHtml(o.numero)}</strong>
+              <span class="badge-estado ${o.estado==='Resuelta'?'badge-resuelta':'badge-pendiente'}">${escapeHtml(o.estado)}</span></div>
+            <div class="cal-obs-desc">${escapeHtml(o.descripcion)}</div>
+            ${o.estado==='Resuelta'&&o.notaResolucion?`<div class="cal-obs-nota">Resolución: ${escapeHtml(o.notaResolucion)}</div>`:''}
+          </div>`).join('');
+      } else {
+        obsHtml = '<div class="cal-vacio">Sin observaciones registradas para este rubro en esta unidad.</div>';
+      }
+      document.getElementById('cal-detalle-obs').innerHTML = obsHtml;
+
+      // Certificados previos
+      let certHtml = '';
+      if (info.certs.length) {
+        certHtml = '<h4>Certificados emitidos</h4>' + info.certs
+          .sort((a,b) => (a.numero||'').localeCompare(b.numero||''))
+          .map(c => `<div class="cal-cert-item">
+            <strong>${escapeHtml(c.numero)}</strong> · ${escapeHtml(c.responsable||'—')}
+            <span class="cal-cert-fecha">${c.fecha?.toDate?.()?.toLocaleDateString('es-AR')||''}</span>
+            <button class="cal-btn-repdf" data-cert="${c.id}">PDF</button>
+          </div>`).join('');
+      }
+      document.getElementById('cal-detalle-certs').innerHTML = certHtml;
+      document.getElementById('cal-detalle-certs').querySelectorAll('.cal-btn-repdf').forEach(b => {
+        b.addEventListener('click', () => {
+          const cert = calidadCerts.find(c => c.id === b.dataset.cert);
+          if (cert) generarPDFCertificado(cert);
+        });
+      });
+
+      // Botón certificar: visible solo si el estado lo permite y no es lector
+      const btnCert = document.getElementById('cal-btn-certificar');
+      btnCert.classList.toggle('oculto', !info.puedeCertificar || esLector);
+
+      document.getElementById('cal-detalle').classList.remove('oculto');
+      document.getElementById('cal-detalle').classList.add('abierto');
+    }
+
+    document.getElementById('cal-detalle-cerrar').addEventListener('click', () => {
+      document.getElementById('cal-detalle').classList.remove('abierto');
+      setTimeout(() => document.getElementById('cal-detalle').classList.add('oculto'), 300);
+      calidadUnidadSel = null;
+    });
+
+    // ── Flujo de certificación ──
+    document.getElementById('cal-btn-certificar').addEventListener('click', () => {
+      if (!calidadUnidadSel) return;
+      const { rubro } = calidadUnidadSel;
+      const empresas = empresasCalidad[rubro] || [];
+      const sel = document.getElementById('cal-cert-responsable');
+      sel.innerHTML = '<option value="">— Elegí responsable —</option>';
+      empresas.slice().sort((a,b)=>a.localeCompare(b)).forEach(e => {
+        const o = document.createElement('option'); o.value = e; o.textContent = e; sel.appendChild(o);
+      });
+      const optOtro = document.createElement('option'); optOtro.value = '__OTRO__'; optOtro.textContent = 'Otro (especificar)…';
+      sel.appendChild(optOtro);
+      document.getElementById('cal-cert-otro-wrap').classList.add('oculto');
+      document.getElementById('cal-cert-otro').value = '';
+      if (!empresas.length) {
+        document.getElementById('cal-cert-aviso').textContent =
+          'Este rubro no tiene empresas cargadas. Elegí "Otro" o cargalas desde el panel de empresas.';
+      } else {
+        document.getElementById('cal-cert-aviso').textContent = '';
+      }
+      document.getElementById('modal-certificar').classList.remove('oculto');
+    });
+
+    document.getElementById('cal-cert-responsable').addEventListener('change', e => {
+      document.getElementById('cal-cert-otro-wrap').classList.toggle('oculto', e.target.value !== '__OTRO__');
+    });
+    document.getElementById('cal-cert-cancelar').addEventListener('click', () =>
+      document.getElementById('modal-certificar').classList.add('oculto'));
+
+    document.getElementById('cal-cert-confirmar').addEventListener('click', async () => {
+      if (!calidadUnidadSel) return;
+      const sel = document.getElementById('cal-cert-responsable').value;
+      const responsable = sel === '__OTRO__'
+        ? document.getElementById('cal-cert-otro').value.trim()
+        : sel;
+      if (!responsable) { alert('Elegí o especificá el responsable.'); return; }
+
+      const { bloqueCod, nivelCod, depto, rubro } = calidadUnidadSel;
+      const info = estadoCelda(bloqueCod, nivelCod, depto, rubro);
+      if (!info.puedeCertificar) { alert('Esta unidad no está en condiciones de certificar.'); return; }
+
+      const btn = document.getElementById('cal-cert-confirmar');
+      btn.disabled = true; btn.textContent = 'Generando…';
+      try {
+        // Snapshot de las obs resueltas que cubre este certificado
+        const resueltas = info.obs.filter(o => o.estado === 'Resuelta');
+        const obsCubiertas = resueltas.map(o => ({
+          id: o.id, numero: o.numero || '', descripcion: o.descripcion || '',
+          severidad: o.severidad || '', responsable: o.responsable || '',
+          fechaCreacion: o.creadoEn?.toDate?.()?.toLocaleDateString('es-AR') || '',
+          notaResolucion: o.notaResolucion || '',
+          fechaResolucion: o.resueltaEn?.toDate?.()?.toLocaleDateString('es-AR') || '',
+        }));
+        const sinObservaciones = obsCubiertas.length === 0;
+
+        // Certificado anterior más reciente de esta celda (para la referencia)
+        const certPrevio = info.certs.slice().sort((a,b) =>
+          (a.numero||'').localeCompare(b.numero||'')).pop();
+
+        const numero = await obtenerSiguienteNumeroCertificado();
+        const certData = {
+          numero, obra: OBRA_NOMBRE,
+          bloqueCod, bloqueNombre: BLOQUES[bloqueCod] || bloqueCod,
+          nivelCod, nivelNombre: NIVELES[nivelCod] || nivelCod,
+          depto, deptoNombre: etiquetaUnidad(depto),
+          rubro, responsable,
+          obsCubiertas, sinObservaciones,
+          certificadoAnteriorNumero: certPrevio?.numero || null,
+          otorgadoPor: currentUser.uid,
+          otorgadoPorNombre: currentUserData.nombre || currentUser.email,
+          fecha: serverTimestamp(),
+        };
+        const ref = await addDoc(collection(db, 'certificados'), certData);
+
+        // Generar PDF (usa la fecha local ya que serverTimestamp aún no resolvió)
+        generarPDFCertificado({ ...certData, id: ref.id, fecha: { toDate: () => new Date() } });
+
+        document.getElementById('modal-certificar').classList.add('oculto');
+        mostrarToast(`✓ ${numero} emitido`);
+        await cargarDatosCalidad();
+        renderizarCroquisCalidad();
+        // Refrescar el panel de detalle con el nuevo estado
+        abrirDetalleUnidad(bloqueCod, nivelCod, depto, rubro);
+      } catch (e) {
+        console.error(e); alert('Error al generar el certificado.');
+        registrarError('certificar_calidad', e);
+      } finally {
+        btn.disabled = false; btn.textContent = 'Confirmar y generar';
+      }
+    });
+
+    // Contador atómico de certificados — CERT-001, CERT-002, …
+    async function obtenerSiguienteNumeroCertificado() {
+      const ref = doc(db, 'contadores', 'certificados');
+      let numero;
+      await runTransaction(db, async (t) => {
+        const snap = await t.get(ref);
+        const actual = snap.exists() ? (snap.data().ultimo || 0) : 0;
+        const sig = actual + 1;
+        t.set(ref, { ultimo: sig }, { merge: true });
+        numero = `CERT-${sig.toString().padStart(3, '0')}`;
+      });
+      return numero;
+    }
+
+    // ── PDF del certificado de calidad ──
+    function generarPDFCertificado(cert) {
+      const { jsPDF } = window.jspdf;
+      const doc = new jsPDF({ orientation: 'p', unit: 'pt', format: 'a4' });
+      const fecha = cert.fecha?.toDate?.()?.toLocaleDateString('es-AR') || new Date().toLocaleDateString('es-AR');
+      const pageW = doc.internal.pageSize.getWidth();
+      const margen = 48;
+      let y = 56;
+
+      // Encabezado
+      doc.setFillColor(26, 26, 26);
+      doc.rect(0, 0, pageW, 90, 'F');
+      doc.setTextColor(200, 169, 110);
+      doc.setFontSize(20); doc.setFont(undefined, 'bold');
+      doc.text('Certificado de Calidad', margen, 44);
+      doc.setTextColor(255, 255, 255);
+      doc.setFontSize(11); doc.setFont(undefined, 'normal');
+      doc.text(cert.obra || OBRA_NOMBRE, margen, 66);
+      doc.setFontSize(14); doc.setFont(undefined, 'bold'); doc.setTextColor(200, 169, 110);
+      doc.text(cert.numero, pageW - margen, 44, { align: 'right' });
+      doc.setTextColor(255,255,255); doc.setFontSize(10); doc.setFont(undefined, 'normal');
+      doc.text(fecha, pageW - margen, 66, { align: 'right' });
+
+      y = 130;
+      doc.setTextColor(0, 0, 0);
+
+      // Datos de la unidad
+      const fila = (label, valor) => {
+        doc.setFont(undefined, 'bold'); doc.setFontSize(10); doc.setTextColor(90, 90, 90);
+        doc.text(label.toUpperCase(), margen, y);
+        doc.setFont(undefined, 'normal'); doc.setFontSize(13); doc.setTextColor(0, 0, 0);
+        doc.text(String(valor || '—'), margen, y + 17);
+        y += 42;
+      };
+      const colX = pageW / 2 + 10;
+      const filaDoble = (l1, v1, l2, v2) => {
+        doc.setFont(undefined, 'bold'); doc.setFontSize(10); doc.setTextColor(90, 90, 90);
+        doc.text(l1.toUpperCase(), margen, y); doc.text(l2.toUpperCase(), colX, y);
+        doc.setFont(undefined, 'normal'); doc.setFontSize(13); doc.setTextColor(0, 0, 0);
+        doc.text(String(v1 || '—'), margen, y + 17); doc.text(String(v2 || '—'), colX, y + 17);
+        y += 42;
+      };
+
+      filaDoble('Edificio', cert.bloqueNombre, 'Nivel', cert.nivelNombre);
+      filaDoble('Unidad / Depto', cert.deptoNombre || cert.depto, 'Rubro', cert.rubro);
+      fila('Responsable / Subcontratista', cert.responsable);
+
+      // Línea divisoria
+      doc.setDrawColor(220, 220, 220); doc.line(margen, y, pageW - margen, y); y += 24;
+
+      // Detalle de observaciones
+      doc.setFont(undefined, 'bold'); doc.setFontSize(12); doc.setTextColor(0, 0, 0);
+      doc.text('Detalle de la inspección', margen, y); y += 8;
+
+      if (cert.sinObservaciones) {
+        y += 16;
+        doc.setFont(undefined, 'normal'); doc.setFontSize(11); doc.setTextColor(60, 60, 60);
+        doc.text('La unidad fue inspeccionada y no presentó observaciones para este rubro.', margen, y);
+        y += 24;
+      } else {
+        doc.autoTable({
+          startY: y + 8,
+          head: [['N°', 'Descripción', 'Severidad', 'Creación', 'Resolución', 'Fecha res.']],
+          body: (cert.obsCubiertas || []).map(o => [
+            o.numero, o.descripcion, o.severidad, o.fechaCreacion,
+            o.notaResolucion || '—', o.fechaResolucion,
+          ]),
+          margin: { left: margen, right: margen },
+          styles: { fontSize: 8, cellPadding: 4, valign: 'top' },
+          headStyles: { fillColor: [26, 26, 26], textColor: [200, 169, 110] },
+          columnStyles: { 1: { cellWidth: 150 }, 4: { cellWidth: 110 } },
+        });
+        y = doc.lastAutoTable.finalY + 20;
+      }
+
+      // Certificado anterior (re-certificación)
+      if (cert.certificadoAnteriorNumero) {
+        doc.setFont(undefined, 'italic'); doc.setFontSize(10); doc.setTextColor(90, 90, 90);
+        doc.text(`Este certificado complementa al ${cert.certificadoAnteriorNumero} emitido previamente para esta unidad y rubro.`, margen, y);
+        y += 26;
+      }
+
+      // Pie: otorgado por + firma
+      const pageH = doc.internal.pageSize.getHeight();
+      let yPie = Math.max(y + 30, pageH - 120);
+      doc.setDrawColor(180, 180, 180); doc.line(margen, yPie, margen + 200, yPie);
+      doc.setFont(undefined, 'normal'); doc.setFontSize(10); doc.setTextColor(60, 60, 60);
+      doc.text('Otorgado por', margen, yPie + 16);
+      doc.setFont(undefined, 'bold'); doc.setFontSize(11); doc.setTextColor(0, 0, 0);
+      doc.text(cert.otorgadoPorNombre || '', margen, yPie + 32);
+      doc.setFont(undefined, 'normal'); doc.setFontSize(9); doc.setTextColor(120, 120, 120);
+      doc.text(`Emitido el ${fecha} · ${cert.numero}`, margen, yPie + 50);
+
+      doc.setProperties({ title: `${cert.numero}_${(cert.deptoNombre||cert.depto)}_${cert.rubro}`.replace(/[^\w\-]+/g, '_') });
+
+      // Abrir en el visor modal reutilizando la infraestructura del informe
+      const blob = doc.output('blob');
+      nombreInformeActual = `${cert.numero}_${(cert.deptoNombre||cert.depto)}_${cert.rubro}`.replace(/[^\w\-]+/g, '_') + '.pdf';
+      if (blobUrlInformeActual) URL.revokeObjectURL(blobUrlInformeActual);
+      blobUrlInformeActual = URL.createObjectURL(blob);
+      document.getElementById('iframe-informe').src = blobUrlInformeActual + '#toolbar=0';
+      document.getElementById('modal-informe').classList.remove('oculto');
+    }
+
+    // ── Panel admin de empresas ──
+    document.getElementById('cal-btn-empresas').addEventListener('click', async () => {
+      if (currentUserData?.rol !== 'admin') return;
+      await cargarEmpresas();
+      renderizarPanelEmpresas();
+      document.getElementById('modal-empresas').classList.remove('oculto');
+    });
+    document.getElementById('cal-empresas-cerrar').addEventListener('click', () =>
+      document.getElementById('modal-empresas').classList.add('oculto'));
+
+    function renderizarPanelEmpresas() {
+      const cont = document.getElementById('lista-empresas');
+      cont.innerHTML = '';
+      RUBROS_CERTIFICABLES.forEach(rubro => {
+        const empresas = (empresasCalidad[rubro] || []).slice().sort((a,b)=>a.localeCompare(b));
+        const div = document.createElement('div');
+        div.className = 'empresa-rubro';
+        div.innerHTML = `<div class="empresa-rubro-titulo">${escapeHtml(rubro)}</div>
+          <div class="empresa-chips">
+            ${empresas.map(e => `<span class="empresa-chip">${escapeHtml(e)}<button class="empresa-quitar" data-rubro="${escapeHtml(rubro)}" data-empresa="${escapeHtml(e)}">✕</button></span>`).join('') || '<span class="empresa-vacio">Sin empresas</span>'}
+          </div>
+          <div class="empresa-add">
+            <input type="text" placeholder="Agregar empresa…" data-rubro="${escapeHtml(rubro)}">
+            <button class="empresa-add-btn" data-rubro="${escapeHtml(rubro)}">+</button>
+          </div>`;
+        cont.appendChild(div);
+      });
+      // Quitar empresa
+      cont.querySelectorAll('.empresa-quitar').forEach(b => b.addEventListener('click', async () => {
+        const { rubro, empresa } = b.dataset;
+        empresasCalidad[rubro] = (empresasCalidad[rubro] || []).filter(e => e !== empresa);
+        await guardarEmpresas(); renderizarPanelEmpresas();
+      }));
+      // Agregar empresa
+      const agregar = async (rubro, input) => {
+        const val = input.value.trim();
+        if (!val) return;
+        empresasCalidad[rubro] = empresasCalidad[rubro] || [];
+        if (!empresasCalidad[rubro].includes(val)) empresasCalidad[rubro].push(val);
+        await guardarEmpresas(); renderizarPanelEmpresas();
+      };
+      cont.querySelectorAll('.empresa-add-btn').forEach(b => b.addEventListener('click', () => {
+        const input = cont.querySelector(`.empresa-add input[data-rubro="${CSS.escape(b.dataset.rubro)}"]`);
+        agregar(b.dataset.rubro, input);
+      }));
+      cont.querySelectorAll('.empresa-add input').forEach(inp => inp.addEventListener('keydown', e => {
+        if (e.key === 'Enter') agregar(inp.dataset.rubro, inp);
+      }));
+    }
+
+    async function guardarEmpresas() {
+      try {
+        await setDoc(doc(db, 'config', 'empresas'),
+          { porRubro: empresasCalidad, actualizadoEn: serverTimestamp() }, { merge: true });
+      } catch (e) { console.error(e); alert('No se pudieron guardar las empresas.'); }
     }
   </script>
 
@@ -923,7 +2142,7 @@
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     :root {
       --bg:#0f1117;--bg2:#1a1d27;--bg3:#232736;--border:#2e3347;
-      --accent:#4f7cff;--accent2:#6c8fff;--danger:#ff4f4f;--success:#2ecc71;
+      --accent:#c8a96e;--accent2:#d8bd8a;--accent-text:#241c0c;--danger:#ff4f4f;--success:#2ecc71;
       --text:#e8eaf0;--text2:#9aa0b8;--pin-pend:#ff4f4f;--pin-res:#2ecc71;
       --radius:10px;--radius-sm:6px;--shadow:0 4px 24px rgba(0,0,0,0.4);--trans:0.2s ease;
     }
@@ -935,9 +2154,10 @@
     .oculto{display:none!important;}
     .loading{color:var(--text2);padding:20px;text-align:center;}
 
-    #pantalla-login{height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:32px;background:radial-gradient(ellipse at 50% 30%,#1a2040 0%,var(--bg) 70%);}
+    #pantalla-login{height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:32px;background:radial-gradient(ellipse at 50% 30%,#201a10 0%,var(--bg) 70%);}
     .login-logo{display:flex;flex-direction:column;align-items:center;gap:12px;}
-    .login-logo-icon{width:72px;height:72px;background:var(--accent);border-radius:18px;display:flex;align-items:center;justify-content:center;font-size:36px;}
+    .login-logo-icon{width:120px;height:120px;border-radius:26px;overflow:hidden;display:flex;align-items:center;justify-content:center;}
+    .login-logo-icon img{width:100%;height:100%;object-fit:cover;}
     .login-title{font-size:22px;font-weight:700;letter-spacing:-0.3px;}
     .login-subtitle{color:var(--text2);font-size:13px;}
     .login-card{background:var(--bg2);border:1px solid var(--border);border-radius:14px;padding:32px 40px;width:340px;display:flex;flex-direction:column;align-items:center;gap:20px;box-shadow:var(--shadow);}
@@ -954,7 +2174,8 @@
     #pantalla-planos{height:100vh;display:flex;flex-direction:column;}
     .header{background:var(--bg2);border-bottom:1px solid var(--border);padding:0 20px;height:56px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0;}
     .header-marca{display:flex;align-items:center;gap:10px;}
-    .header-icono{width:32px;height:32px;background:var(--accent);border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:16px;}
+    .header-icono{width:32px;height:32px;border-radius:8px;overflow:hidden;display:flex;align-items:center;justify-content:center;}
+    .header-icono img{width:100%;height:100%;object-fit:cover;}
     .header-titulo{font-weight:700;font-size:15px;}.header-subtitulo{font-size:11px;color:var(--text2);}
     .header-acciones{display:flex;align-items:center;gap:10px;}
     .user-info{display:flex;align-items:center;gap:8px;}
@@ -965,14 +2186,16 @@
     .planos-body{flex:1;overflow-y:auto;padding:24px;}
     .planos-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;}
     .planos-header h2{font-size:18px;font-weight:700;}.planos-header p{font-size:12px;color:var(--text2);margin-top:2px;}
-    .btn-primary{background:var(--accent);color:#fff;padding:9px 18px;border-radius:var(--radius-sm);font-weight:600;}
+    .btn-primary{background:var(--accent);color:var(--accent-text);padding:9px 18px;border-radius:var(--radius-sm);font-weight:600;}
     .btn-primary:hover{background:var(--accent2);}
     .filtros-bar{display:flex;flex-direction:column;gap:8px;margin-bottom:16px;}
     .filtro-busqueda{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:9px 12px;font-size:13px;color:var(--text);width:100%;outline:none;}
     .filtro-busqueda:focus{border-color:var(--accent);}
-    .filtros-selects{display:flex;gap:8px;flex-wrap:wrap;align-items:center;}
-    .filtros-selects select{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:7px 10px;font-size:12px;color:var(--text);flex:1;min-width:110px;cursor:pointer;}
-    .filtros-selects select:focus{border-color:var(--accent);}
+    .filtros-selects{display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;}
+    .campo-filtro{display:flex;flex-direction:column;gap:3px;flex:1;min-width:110px;}
+    .campo-filtro label{font-size:10px;color:var(--text2);font-weight:600;text-transform:uppercase;letter-spacing:0.4px;padding-left:1px;}
+    .campo-filtro select{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:7px 10px;font-size:12px;color:var(--text);width:100%;cursor:pointer;}
+    .campo-filtro select:focus{border-color:var(--accent);}
     .btn-limpiar{background:transparent;color:var(--text2);padding:7px 12px;border-radius:var(--radius-sm);border:1px solid var(--border);font-size:12px;white-space:nowrap;flex-shrink:0;}
     .btn-limpiar:hover{color:var(--danger);border-color:var(--danger);}
     .lista-planos{display:flex;flex-direction:column;gap:10px;}
@@ -981,7 +2204,7 @@
     .plano-info{display:flex;align-items:center;gap:14px;}.plano-icono{font-size:24px;}
     .plano-nombre{font-weight:600;font-size:15px;}.plano-meta{font-size:11px;color:var(--text2);margin-top:2px;}
     .plano-acciones{display:flex;align-items:center;gap:8px;}
-    .btn-abrir{background:var(--accent);color:#fff;padding:7px 16px;border-radius:var(--radius-sm);font-weight:600;}
+    .btn-abrir{background:var(--accent);color:var(--accent-text);padding:7px 16px;border-radius:var(--radius-sm);font-weight:600;}
     .btn-abrir:hover{background:var(--accent2);}
     .btn-eliminar-plano{background:transparent;color:var(--text2);padding:6px 8px;border-radius:var(--radius-sm);font-size:16px;border:1px solid var(--border);}
     .btn-eliminar-plano:hover{color:var(--danger);border-color:var(--danger);}
@@ -990,8 +2213,8 @@
 
     #pantalla-inspector{height:100vh;display:flex;flex-direction:column;}
     .inspector-header{background:var(--bg2);border-bottom:1px solid var(--border);padding:0 16px;height:56px;display:flex;align-items:center;gap:12px;flex-shrink:0;}
-    .btn-volver{background:var(--bg3);color:var(--text);padding:7px 10px;border-radius:var(--radius-sm);border:1px solid var(--border);font-size:18px;line-height:1;}
-    .btn-volver:hover{background:var(--border);}
+    .btn-volver{background:transparent;color:var(--text2);width:32px;height:32px;border-radius:50%;border:none;font-size:18px;line-height:1;display:flex;align-items:center;justify-content:center;}
+    .btn-volver:hover{background:var(--bg3);color:var(--text);}
 
     /* ── Pestañas ── */
     #pestañas-bar{background:var(--bg);border-bottom:1px solid var(--border);display:flex;align-items:flex-end;padding:0 16px;gap:2px;flex-shrink:0;overflow-x:auto;min-height:36px;}
@@ -1012,10 +2235,17 @@
     .btn-pag:disabled{opacity:0.4;cursor:default;}.btn-pag:not(:disabled):hover{background:var(--border);}
     #btn-pagina-actual{background:var(--bg3);color:var(--text2);padding:6px 12px;border-radius:var(--radius-sm);border:1px solid var(--border);font-size:12px;min-width:90px;text-align:center;}
     .toolbar-sep{flex:1;}
-    #btn-nueva-obs{background:var(--accent);color:#fff;padding:7px 14px;border-radius:var(--radius-sm);font-weight:600;}
-    #btn-nueva-obs:hover{background:var(--accent2);}#btn-nueva-obs.activo{background:var(--danger);}
+    #btn-nueva-obs{background:var(--accent);color:var(--accent-text);padding:7px 14px;border-radius:var(--radius-sm);font-weight:600;}
+    #btn-nueva-obs:hover{background:var(--accent2);}#btn-nueva-obs.activo{background:var(--danger);color:#fff;}
     #btn-sincronizar{background:var(--bg3);color:var(--text);padding:7px 14px;border-radius:var(--radius-sm);border:1px solid var(--border);}
     #btn-sincronizar:hover{background:var(--border);}
+    #btn-imprimir-informe{background:var(--bg3);color:var(--text);padding:7px 14px;border-radius:var(--radius-sm);border:1px solid var(--border);}
+    #btn-imprimir-informe:hover{background:var(--border);}
+    #btn-imprimir-informe:disabled{opacity:0.5;cursor:default;}
+    #btn-lista-obs{background:var(--bg3);color:var(--text);padding:7px 14px;border-radius:var(--radius-sm);border:1px solid var(--border);}
+    #btn-lista-obs:hover{background:var(--border);}
+    .btn-icono-texto{display:inline-flex;align-items:center;gap:6px;}
+    .btn-icono-texto svg{width:14px;height:14px;flex-shrink:0;}
     #contador-obs{font-size:12px;color:var(--text2);white-space:nowrap;}
 
     .inspector-body{flex:1;overflow:hidden;position:relative;}
@@ -1033,8 +2263,9 @@
     #pdf-wrapper{position:relative;display:inline-block;}
     #pdf-canvas{display:block;}
     #marcadores-overlay{position:absolute;top:0;left:0;pointer-events:none;}
-    .pin{position:absolute;width:28px;height:28px;border-radius:50% 50% 50% 0;transform:translate(-50%,-100%) rotate(-45deg);display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:#fff;cursor:pointer;pointer-events:all;transition:transform var(--trans);box-shadow:0 2px 8px rgba(0,0,0,0.4);}
+    .pin{position:absolute;width:34px;height:34px;border-radius:50% 50% 50% 0;transform:translate(-50%,-100%) rotate(-45deg);display:flex;align-items:center;justify-content:center;color:#fff;cursor:pointer;pointer-events:all;transition:transform var(--trans);box-shadow:0 2px 8px rgba(0,0,0,0.4);}
     .pin:hover{transform:translate(-50%,-110%) rotate(-45deg) scale(1.1);}
+    .pin-num{transform:rotate(45deg);font-size:13px;font-weight:800;line-height:1;}
     .pin-pendiente{background:var(--pin-pend);}.pin-resuelta{background:var(--pin-res);}
     #pdf-spinner{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-size:13px;color:var(--text2);background:var(--bg2);padding:12px 20px;border-radius:var(--radius);border:1px solid var(--border);}
 
@@ -1047,11 +2278,11 @@
     .campo{display:flex;flex-direction:column;gap:5px;}
     .campo label{font-size:11px;color:var(--text2);font-weight:600;text-transform:uppercase;letter-spacing:0.5px;}
     .campo-foto{display:flex;flex-direction:column;gap:6px;}
-    #obs-foto-preview{width:100%;border-radius:var(--radius-sm);object-fit:cover;max-height:150px;border:1px solid var(--border);}
+    #obs-foto-preview{width:100%;border-radius:var(--radius-sm);object-fit:cover;max-height:150px;border:1px solid var(--border);cursor:pointer;}
     .btn-foto{background:var(--bg3);color:var(--text);padding:7px;border-radius:var(--radius-sm);border:1px solid var(--border);text-align:center;font-size:12px;}
     .btn-foto:hover{background:var(--border);}
     .panel-footer{padding:12px 16px;border-top:1px solid var(--border);display:flex;gap:8px;flex-shrink:0;}
-    #btn-guardar-obs{flex:1;background:var(--accent);color:#fff;padding:9px;border-radius:var(--radius-sm);font-weight:600;}
+    #btn-guardar-obs{flex:1;background:var(--accent);color:var(--accent-text);padding:9px;border-radius:var(--radius-sm);font-weight:600;}
     #btn-guardar-obs:hover:not(:disabled){background:var(--accent2);}#btn-guardar-obs:disabled{opacity:0.5;cursor:default;}
     #btn-eliminar-obs{background:var(--bg3);color:var(--danger);padding:9px 12px;border-radius:var(--radius-sm);border:1px solid var(--border);}
     #btn-eliminar-obs:hover{background:rgba(255,79,79,0.1);}
@@ -1059,15 +2290,35 @@
     .btn-eliminar-foto:hover{background:rgba(255,79,79,0.1);border-color:var(--danger);}
     #panel-obs.modo-lectura select:disabled,#panel-obs.modo-lectura input:disabled,#panel-obs.modo-lectura textarea:disabled{opacity:0.75;cursor:default;background:var(--bg3);}
 
+    /* ── Panel lista de observaciones ── */
+    #panel-lista-obs{position:absolute;right:0;top:0;bottom:0;width:340px;background:var(--bg2);border-left:1px solid var(--border);display:flex;flex-direction:column;transform:translateX(100%);transition:transform 0.3s ease;z-index:11;box-shadow:-4px 0 20px rgba(0,0,0,0.3);}
+    #panel-lista-obs.abierto{transform:translateX(0);}
+    .lista-obs-filtros{padding:10px 16px;border-bottom:1px solid var(--border);flex-shrink:0;}
+    .lista-obs-filtros select{font-size:12px;padding:6px 8px;}
+    .lista-obs-items{gap:8px;}
+    .item-lista-obs{background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius-sm);padding:10px 12px;cursor:pointer;transition:border-color var(--trans);display:flex;flex-direction:column;gap:4px;}
+    .item-lista-obs:hover{border-color:var(--accent);}
+    .item-lista-obs-header{display:flex;justify-content:space-between;align-items:center;}
+    .item-lista-obs-numero{font-size:12px;font-weight:700;color:var(--accent2);}
+    .badge-estado{font-size:9px;padding:2px 8px;border-radius:20px;font-weight:600;text-transform:uppercase;letter-spacing:0.3px;}
+    .badge-pendiente{background:rgba(255,79,79,0.15);color:var(--pin-pend);}
+    .badge-resuelta{background:rgba(46,204,113,0.15);color:var(--success);}
+    .item-lista-obs-rubro{font-size:11px;color:var(--text2);font-weight:600;}
+    .item-lista-obs-desc{font-size:12px;color:var(--text);overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;}
+    .item-lista-obs-meta{font-size:10px;color:var(--text3);}
+
     .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:100;padding:20px;}
     .modal{background:var(--bg2);border:1px solid var(--border);border-radius:14px;width:480px;max-width:100%;max-height:80vh;display:flex;flex-direction:column;box-shadow:var(--shadow);}
+    .modal-informe{width:95vw;max-width:1000px;height:92vh;max-height:92vh;}
+    .modal-body-informe{padding:0;flex:1;overflow:hidden;}
+    #iframe-informe{width:100%;height:100%;border:none;display:block;}
     .modal-header{padding:16px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;flex-shrink:0;}
     .modal-header h3{font-size:15px;font-weight:700;}
     .modal-body{flex:1;overflow-y:auto;padding:16px 20px;}
     .btn-cerrar-modal{background:var(--bg3);color:var(--text2);width:28px;height:28px;border-radius:50%;font-size:16px;border:1px solid var(--border);}
     .item-dropbox{display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid var(--border);gap:12px;}
     .item-dropbox span{font-size:13px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-    .btn-seleccionar{background:var(--accent);color:#fff;padding:6px 12px;border-radius:var(--radius-sm);font-size:12px;flex-shrink:0;}
+    .btn-seleccionar{background:var(--accent);color:var(--accent-text);padding:6px 12px;border-radius:var(--radius-sm);font-size:12px;flex-shrink:0;}
     .dropbox-breadcrumb-bar{padding:8px 20px;background:var(--bg3);border-bottom:1px solid var(--border);font-size:11px;color:var(--text2);font-family:monospace;}
     .item-carpeta{cursor:pointer;font-weight:500;}.item-carpeta:hover{background:var(--bg3);border-radius:var(--radius-sm);}
     .item-arrow{color:var(--text2);font-size:18px;}
@@ -1082,19 +2333,99 @@
     #toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%) translateY(20px);background:var(--bg3);color:var(--text);padding:10px 20px;border-radius:20px;border:1px solid var(--border);font-size:13px;opacity:0;transition:opacity 0.3s,transform 0.3s;z-index:200;}
     #toast.visible{opacity:1;transform:translateX(-50%) translateY(0);}
 
+    /* ═══ HOME ═══ */
+    #pantalla-home{height:100vh;display:flex;flex-direction:column;}
+    .home-body{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:40px;padding:24px;}
+    .home-titulo{text-align:center;}
+    .home-titulo h1{font-size:26px;font-weight:700;letter-spacing:-0.3px;}
+    .home-titulo p{color:var(--text2);font-size:14px;margin-top:6px;}
+    .home-botones{display:flex;gap:20px;flex-wrap:wrap;justify-content:center;max-width:720px;}
+    .home-card{background:var(--bg2);border:1px solid var(--border);border-radius:16px;padding:32px 28px;width:320px;max-width:100%;display:flex;flex-direction:column;align-items:center;gap:14px;text-align:center;transition:border-color var(--trans),transform var(--trans),background var(--trans);}
+    .home-card:hover{border-color:var(--accent);transform:translateY(-3px);background:var(--bg3);}
+    .home-card-icono{width:72px;height:72px;border-radius:18px;background:rgba(200,169,110,0.12);display:flex;align-items:center;justify-content:center;color:var(--accent);}
+    .home-card-icono svg{width:36px;height:36px;}
+    .home-card-titulo{font-size:18px;font-weight:700;color:var(--text);}
+    .home-card-desc{font-size:13px;color:var(--text2);line-height:1.5;}
+
+    /* ═══ CALIDAD ═══ */
+    #pantalla-calidad{height:100vh;display:flex;flex-direction:column;}
+    .calidad-body{flex:1;overflow-y:auto;padding:20px 24px;display:flex;flex-direction:column;gap:16px;}
+    .calidad-selectores{display:flex;gap:12px;flex-wrap:wrap;}
+    .calidad-selectores .campo-filtro{flex:1;min-width:150px;}
+    .calidad-leyenda{display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--text2);}
+    .calidad-leyenda span{display:inline-flex;align-items:center;gap:6px;}
+    .calidad-leyenda .chip{width:14px;height:14px;border-radius:4px;display:inline-block;border:1px solid rgba(255,255,255,0.15);}
+    .chip.estado-sin-inspeccion{background:#e05252;}
+    .chip.estado-con-pendientes{background:#e8a33d;}
+    .chip.estado-lista{background:#4aa3df;}
+    .chip.estado-certificada{background:#2ecc71;}
+    .calidad-croquis{background:#fdfdfb;border:1px solid var(--border);border-radius:12px;padding:20px;min-height:300px;display:flex;align-items:center;justify-content:center;}
+    .calidad-croquis svg{width:100%;height:auto;max-height:70vh;}
+    .cal-placeholder{color:#7a8090;font-size:14px;text-align:center;line-height:1.6;}
+    /* Estados de las unidades del croquis */
+    .calidad-croquis .unidad{transition:fill .2s ease, filter .2s ease;}
+    .calidad-croquis .unidad:hover{filter:brightness(1.12);}
+    .calidad-croquis .unidad.estado-sin-inspeccion{fill:#e05252;}
+    .calidad-croquis .unidad.estado-con-pendientes{fill:#e8a33d;}
+    .calidad-croquis .unidad.estado-lista{fill:#4aa3df;}
+    .calidad-croquis .unidad.estado-certificada{fill:#2ecc71;}
+    .calidad-croquis .unidad-etiqueta path{fill:#fff!important;}
+
+    /* Panel detalle unidad (mismo patrón que panel-obs) */
+    #cal-detalle{position:absolute;right:0;top:0;bottom:0;width:360px;background:var(--bg2);border-left:1px solid var(--border);display:flex;flex-direction:column;transform:translateX(100%);transition:transform 0.3s ease;z-index:12;box-shadow:-4px 0 20px rgba(0,0,0,0.3);}
+    #cal-detalle.abierto{transform:translateX(0);}
+    #pantalla-calidad{position:relative;}
+    .cal-detalle-estado-row{margin-bottom:4px;}
+    .cal-badge-estado{display:inline-block;font-size:11px;font-weight:700;padding:5px 12px;border-radius:20px;text-transform:uppercase;letter-spacing:0.4px;}
+    .estado-badge-sin-inspeccion{background:rgba(224,82,82,0.15);color:#e05252;}
+    .estado-badge-con-pendientes{background:rgba(232,163,61,0.15);color:#e8a33d;}
+    .estado-badge-lista{background:rgba(74,163,223,0.15);color:#4aa3df;}
+    .estado-badge-certificada{background:rgba(46,204,113,0.15);color:#2ecc71;}
+    .cal-obs-item{background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius-sm);padding:10px 12px;margin-bottom:8px;border-left:3px solid var(--border);}
+    .cal-obs-item.pend{border-left-color:var(--pin-pend);}
+    .cal-obs-item.res{border-left-color:var(--success);}
+    .cal-obs-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;}
+    .cal-obs-desc{font-size:12px;color:var(--text);}
+    .cal-obs-nota{font-size:11px;color:var(--text2);margin-top:4px;font-style:italic;}
+    .cal-vacio{color:var(--text2);font-size:13px;padding:8px 0;}
+    #cal-detalle-certs h4{font-size:12px;text-transform:uppercase;letter-spacing:0.4px;color:var(--text2);margin:14px 0 8px;}
+    .cal-cert-item{background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius-sm);padding:8px 10px;margin-bottom:6px;font-size:12px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+    .cal-cert-fecha{color:var(--text2);}
+    .cal-btn-repdf{margin-left:auto;background:var(--bg2);color:var(--accent2);border:1px solid var(--border);border-radius:4px;padding:3px 8px;font-size:11px;}
+    .cal-btn-repdf:hover{background:var(--border);}
+    #cal-btn-certificar{flex:1;background:var(--accent);color:var(--accent-text);padding:11px;border-radius:var(--radius-sm);font-weight:600;font-size:14px;}
+    #cal-btn-certificar:hover{background:var(--accent2);}
+
+    /* Panel empresas */
+    .empresa-rubro{padding:12px 0;border-bottom:1px solid var(--border);}
+    .empresa-rubro-titulo{font-size:13px;font-weight:700;color:var(--accent2);margin-bottom:8px;}
+    .empresa-chips{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;}
+    .empresa-chip{background:var(--bg3);border:1px solid var(--border);border-radius:20px;padding:4px 8px 4px 12px;font-size:12px;display:inline-flex;align-items:center;gap:6px;}
+    .empresa-quitar{background:none;border:none;color:var(--text2);font-size:12px;cursor:pointer;padding:0 2px;}
+    .empresa-quitar:hover{color:var(--danger);}
+    .empresa-vacio{font-size:12px;color:var(--text2);font-style:italic;}
+    .empresa-add{display:flex;gap:6px;}
+    .empresa-add input{flex:1;font-size:12px;padding:6px 8px;}
+    .empresa-add-btn{background:var(--accent);color:var(--accent-text);border-radius:var(--radius-sm);width:32px;font-weight:700;font-size:16px;flex-shrink:0;}
+
     @media(max-width:600px){
       #panel-obs{width:100%;max-width:360px;}
+      #panel-lista-obs{width:100%;max-width:360px;}
+      #cal-detalle{width:100%;max-width:100%;}
+      .btn-icono-texto span{display:none;}
       .login-card{width:100%;padding:24px 20px;}
       .user-texts{display:none;}
       .pestaña-nombre{max-width:80px;}
+      .home-card{width:100%;}
+      #home-user-nombre{display:none;}
     }
   </style>
 </head>
 <body>
   <div id="pantalla-login" class="oculto">
     <div class="login-logo">
-      <div class="login-logo-icon">🏗</div>
-      <div class="login-title">GC Inspector</div>
+      <div class="login-logo-icon"><img src="logo.png" alt="GC Inspector"></div>
+      <div class="login-title">Inspector de obra</div>
       <div class="login-subtitle">Catamarán 12 — Goldstein Construcciones</div>
     </div>
     <div class="login-card">
@@ -1114,11 +2445,47 @@
     </div>
   </div>
 
+  <div id="pantalla-home" class="oculto">
+    <header class="header">
+      <div class="header-marca">
+        <div class="header-icono"><img src="logo.png" alt="GC"></div>
+        <div><div class="header-titulo">Goldstein Construcciones</div><div class="header-subtitulo">Catamarán 12</div></div>
+      </div>
+      <div class="header-acciones">
+        <span id="home-user-nombre" class="user-nombre" style="margin-right:8px"></span>
+        <button class="btn-logout btn-secondary">Cerrar sesión</button>
+      </div>
+    </header>
+    <div class="home-body">
+      <div class="home-titulo">
+        <h1>¿Qué querés hacer?</h1>
+        <p>Elegí una herramienta para empezar</p>
+      </div>
+      <div class="home-botones">
+        <button id="btn-home-inspeccionar" class="home-card">
+          <div class="home-card-icono">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
+          </div>
+          <div class="home-card-titulo">Inspeccionar</div>
+          <div class="home-card-desc">Planos, observaciones y sincronización con el Sheet</div>
+        </button>
+        <button id="btn-home-calidad" class="home-card">
+          <div class="home-card-icono">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M9 12l2 2 4-4"/><path d="M21 12c-1 0-3-1-3-3s2-3 3-3-2-1-3-3 1-3-1-3-3 2-3 3-1-2-3-3-3 2-3 3 2 1 3 3-1 3-3 3 3 1 3 3-2 3-3 3 3 1 3 3 1 3 3 3 1-2 3-3 3 2 3 3z" opacity="0"/><circle cx="12" cy="12" r="9"/></svg>
+          </div>
+          <div class="home-card-titulo">Certificado de calidad</div>
+          <div class="home-card-desc">Estado de cada unidad por rubro y emisión de certificados</div>
+        </button>
+      </div>
+    </div>
+  </div>
+
   <div id="pantalla-planos" class="oculto">
     <header class="header">
       <div class="header-marca">
-        <div class="header-icono">🏗</div>
-        <div><div class="header-titulo">GC Inspector</div><div class="header-subtitulo">Catamarán 12</div></div>
+        <button class="btn-ir-home btn-volver" title="Inicio">⌂</button>
+        <div class="header-icono"><img src="logo.png" alt="GC Inspector"></div>
+        <div><div class="header-titulo">Inspector de obra</div><div class="header-subtitulo">Catamarán 12</div></div>
       </div>
       <div class="header-acciones">
         <button id="btn-volver-inspector" class="btn-secondary oculto">← Inspector</button>
@@ -1142,10 +2509,10 @@
       <div class="filtros-bar">
         <input type="text" id="filtro-busqueda" placeholder="🔍 Buscar plano..." class="filtro-busqueda">
         <div class="filtros-selects">
-          <select id="filtro-disciplina"><option value="">Disciplina</option></select>
-          <select id="filtro-nivel"><option value="">Nivel</option></select>
-          <select id="filtro-bloque"><option value="">Bloque</option></select>
-          <select id="filtro-depto"><option value="">Depto.</option></select>
+          <div class="campo-filtro"><label>Disciplina</label><select id="filtro-disciplina"><option value="">Todos</option></select></div>
+          <div class="campo-filtro"><label>Nivel</label><select id="filtro-nivel"><option value="">Todos</option></select></div>
+          <div class="campo-filtro"><label>Bloque</label><select id="filtro-bloque"><option value="">Todos</option></select></div>
+          <div class="campo-filtro"><label>Depto.</label><select id="filtro-depto"><option value="">Todos</option></select></div>
           <button id="btn-limpiar-filtros" class="btn-limpiar">✕ Limpiar</button>
         </div>
       </div>
@@ -1169,9 +2536,29 @@
     </div>
   </div>
 
+  <div id="modal-informe" class="modal-overlay oculto">
+    <div class="modal modal-informe">
+      <div class="modal-header">
+        <h3>Informe</h3>
+        <div style="display:flex;gap:8px;align-items:center">
+          <button id="btn-descargar-informe" class="btn-secondary btn-icono-texto" style="font-size:12px;padding:6px 12px">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v8"/><path d="m8 12 4 4 4-4"/></svg>
+            <span>Descargar</span>
+          </button>
+          <button id="btn-imprimir-informe-modal" class="btn-secondary btn-icono-texto" style="font-size:12px;padding:6px 12px">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8" rx="1"/></svg>
+            <span>Imprimir</span>
+          </button>
+          <button id="btn-cerrar-modal-informe" class="btn-cerrar-modal">✕</button>
+        </div>
+      </div>
+      <div class="modal-body modal-body-informe"><iframe id="iframe-informe"></iframe></div>
+    </div>
+  </div>
+
   <div id="pantalla-inspector" class="oculto">
     <header class="inspector-header">
-      <button id="btn-volver" class="btn-volver" title="Ir al inicio">🏠</button>
+      <button id="btn-volver" class="btn-volver" title="Ir al inicio">⌂</button>
       <div class="inspector-titulo"><h1 id="inspector-titulo">Plano</h1><span id="inspector-obra"></span></div>
       <button class="btn-logout btn-secondary" style="font-size:12px;padding:6px 10px">Cerrar sesión</button>
     </header>
@@ -1188,7 +2575,18 @@
       <button id="btn-zoom-in" class="btn-pag">+</button>
       <div class="toolbar-sep"></div>
       <span id="contador-obs"></span>
-      <button id="btn-sincronizar">✓ Certificar</button>
+      <button id="btn-imprimir-informe" class="btn-icono-texto">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
+        <span>Ver informe</span>
+      </button>
+      <button id="btn-sincronizar" class="btn-icono-texto">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+        <span>Certificar</span>
+      </button>
+      <button id="btn-lista-obs" class="btn-icono-texto">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+        <span>Lista de obs.</span>
+      </button>
       <button id="btn-nueva-obs">+ Nueva obs.</button>
     </div>
     <div class="inspector-body">
@@ -1199,10 +2597,26 @@
           <div id="pdf-spinner" class="oculto">Cargando plano...</div>
         </div>
       </div>
+      <div id="panel-lista-obs" class="oculto">
+        <div class="panel-header">
+          <h3>Observaciones del plano</h3>
+          <button id="btn-cerrar-lista-obs" class="btn-cerrar-panel">✕</button>
+        </div>
+        <div class="lista-obs-filtros">
+          <select id="lista-obs-filtro-estado">
+            <option value="">Todos los estados</option>
+            <option value="Pendiente">Pendientes</option>
+            <option value="Resuelta">Resueltas</option>
+          </select>
+        </div>
+        <div id="lista-obs-items" class="panel-body lista-obs-items"></div>
+      </div>
+
       <div id="panel-obs" class="oculto">
         <div class="panel-header"><h3 id="panel-titulo">Nueva observación</h3><button id="btn-cerrar-panel" class="btn-cerrar-panel">✕</button></div>
         <div class="panel-body">
           <input type="hidden" id="obs-x"><input type="hidden" id="obs-y">
+          <div class="campo"><label>Depto / Unidad</label><select id="obs-depto"></select></div>
           <div class="campo"><label>Rubro *</label><select id="obs-rubro"><option value="">— Seleccioná —</option></select></div>
           <div class="campo"><label>Responsable</label><select id="obs-responsable"><option value="">— Seleccioná rubro primero —</option></select></div>
           <div id="obs-responsable-otro" class="campo oculto"><label>Especificá el responsable</label><input type="text" id="obs-responsable-otro-texto" placeholder="Nombre del responsable"></div>
@@ -1222,6 +2636,94 @@
           <button id="btn-guardar-obs">Guardar</button>
         </div>
       </div>
+    </div>
+  </div>
+
+  <!-- ─── PANTALLA CALIDAD ─── -->
+  <div id="pantalla-calidad" class="oculto">
+    <header class="header">
+      <div class="header-marca">
+        <button class="btn-ir-home btn-volver" title="Inicio">⌂</button>
+        <div class="header-icono"><img src="logo.png" alt="GC"></div>
+        <div><div class="header-titulo">Certificado de calidad</div><div class="header-subtitulo">Catamarán 12</div></div>
+      </div>
+      <div class="header-acciones">
+        <button id="cal-btn-empresas" class="btn-secondary oculto">🏢 Empresas</button>
+        <button id="cal-btn-actualizar" class="btn-secondary">↻ Actualizar</button>
+        <button class="btn-logout btn-secondary">Cerrar sesión</button>
+      </div>
+    </header>
+    <div class="calidad-body">
+      <div class="calidad-selectores">
+        <div class="campo-filtro"><label>Bloque</label>
+          <select id="cal-bloque"><option value="">— Bloque —</option><option value="T">Torre</option><option value="B">Basamento</option></select>
+        </div>
+        <div class="campo-filtro"><label>Nivel</label>
+          <select id="cal-nivel"><option value="">— Nivel —</option></select>
+        </div>
+        <div class="campo-filtro"><label>Rubro</label>
+          <select id="cal-rubro"><option value="">— Elegí un rubro —</option></select>
+        </div>
+      </div>
+      <div class="calidad-leyenda">
+        <span><span class="chip estado-sin-inspeccion"></span>Sin inspección</span>
+        <span><span class="chip estado-con-pendientes"></span>Con pendientes</span>
+        <span><span class="chip estado-lista"></span>Listo para certificar</span>
+        <span><span class="chip estado-certificada"></span>Certificado</span>
+      </div>
+      <div id="cal-croquis-cont" class="calidad-croquis">
+        <div class="cal-placeholder">Elegí bloque, nivel y rubro para ver el croquis.</div>
+      </div>
+    </div>
+
+    <!-- Panel de detalle de unidad -->
+    <div id="cal-detalle" class="oculto">
+      <div class="panel-header">
+        <div>
+          <h3 id="cal-detalle-titulo">Unidad</h3>
+          <span id="cal-detalle-sub" style="font-size:11px;color:var(--text2)"></span>
+        </div>
+        <button id="cal-detalle-cerrar" class="btn-cerrar-panel">✕</button>
+      </div>
+      <div class="panel-body">
+        <div class="cal-detalle-estado-row">
+          <span id="cal-detalle-estado" class="cal-badge-estado">—</span>
+        </div>
+        <div id="cal-detalle-obs"></div>
+        <div id="cal-detalle-certs"></div>
+      </div>
+      <div class="panel-footer">
+        <button id="cal-btn-certificar" class="oculto">Generar certificado de calidad</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: elegir responsable y certificar -->
+  <div id="modal-certificar" class="modal-overlay oculto">
+    <div class="modal" style="width:420px">
+      <div class="modal-header"><h3>Emitir certificado</h3><button id="cal-cert-cancelar" class="btn-cerrar-modal">✕</button></div>
+      <div class="modal-body">
+        <div class="campo">
+          <label>Responsable / Subcontratista</label>
+          <select id="cal-cert-responsable"><option value="">— Elegí responsable —</option></select>
+        </div>
+        <div id="cal-cert-otro-wrap" class="campo oculto">
+          <label>Especificá el responsable</label>
+          <input type="text" id="cal-cert-otro" placeholder="Nombre de la empresa / persona">
+        </div>
+        <p id="cal-cert-aviso" style="font-size:12px;color:var(--text2);margin-top:4px"></p>
+      </div>
+      <div class="panel-footer">
+        <button id="cal-cert-confirmar" class="btn-primary" style="flex:1">Confirmar y generar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: admin de empresas -->
+  <div id="modal-empresas" class="modal-overlay oculto">
+    <div class="modal" style="width:520px;max-height:85vh">
+      <div class="modal-header"><h3>Empresas por rubro</h3><button id="cal-empresas-cerrar" class="btn-cerrar-modal">✕</button></div>
+      <div class="modal-body"><div id="lista-empresas"></div></div>
     </div>
   </div>
 
